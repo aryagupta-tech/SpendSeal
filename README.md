@@ -21,6 +21,20 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 
 Security language is deliberately narrow: merchant-managed data is authoritative inside AgentRail’s trust domain; refund terms are checked but not guaranteed; passkeys prove authenticator control, not legal identity; the audit chain is tamper-evident, not blockchain or externally anchored.
 
+## Current verification status
+
+The checked-in build has been verified with:
+
+- TypeScript project-reference type checking.
+- Production builds for the shared core, Express server, and React frontend.
+- Thirteen automated policy, cryptography, OAuth, PostgreSQL, concurrency, tenant-isolation, and audit-integrity tests.
+- A production dependency audit with zero known runtime vulnerabilities.
+- An OrbStack Compose build and health check with both PostgreSQL and AgentRail reporting healthy.
+- An unauthenticated MCP probe returning `401 Unauthorized` with the OAuth protected-resource challenge.
+- A browser smoke test of the production login page with no console errors.
+
+The Playwright specification covers the complete account → merchant → product → IntentLock → passkey → mock payment → audit flow. On macOS it requires a locally runnable Playwright Chromium installation with WebAuthn virtual-authenticator support.
+
 ## Run with OrbStack (recommended)
 
 Requirements: OrbStack with Docker Compose support.
@@ -54,6 +68,20 @@ Requirements: OrbStack with Docker Compose support.
 
 The app process applies verified SQL migrations before listening. `/api/v1/health` becomes healthy only when PostgreSQL is reachable and migrations are ready.
 
+### First-run product flow
+
+1. Register an AgentRail account with a device passkey.
+2. Create your merchant trust domain.
+3. Publish at least one product with a SKU, INR price, availability, and merchant-stated refund terms.
+4. Connect the deterministic mock adapter for a zero-cost demo, or connect that merchant’s Razorpay Test account.
+5. Select the product in the buyer view and set the maximum spend, refund requirement, price-change policy, and expiry.
+6. Create the IntentLock and open its one-time approval URL.
+7. Approve with the same buyer account’s passkey.
+8. Run the deterministic policy check and complete the Test Mode checkout.
+9. Open the IntentLock audit explorer and verify its SHA-256 hash-linked chain.
+
+The merchant controls authoritative product facts. The buyer controls authorization constraints. Neither ChatGPT nor an approval URL can approve the payment.
+
 ## Run locally with Node
 
 Start PostgreSQL first (Compose can provide only the database):
@@ -67,6 +95,11 @@ npm run dev
 ```
 
 Open `http://localhost:5173`. Vite proxies `/api` and `/mcp` to port 43117.
+
+| Runtime | Browser URL | API port | Intended use |
+|---|---:|---:|---|
+| OrbStack Compose | `http://localhost:43118` | Host `43118` → container `43117` | Recommended full stack |
+| Local Vite + Node | `http://localhost:5173` | `43117` | Frontend development and hot reload |
 
 Useful commands:
 
@@ -147,7 +180,7 @@ docker compose exec -T postgres pg_restore -U agentrail -d agentrail --clean --i
 
 Treat backups as secrets because they contain encrypted merchant credentials and hashed tokens. Store the matching encryption key separately.
 
-To rotate credential encryption safely, generate a new 32-byte base64 key, increment `CREDENTIAL_ENCRYPTION_KEY_VERSION`, re-enter each merchant’s Razorpay Test credentials from the dashboard, verify the new configuration, then retire the old key only after all active configurations have moved. API keys are rotated by creating a replacement, updating the integration, and revoking the old key.
+To rotate credential encryption safely, generate a new 32-byte base64 key, increment `CREDENTIAL_ENCRYPTION_KEY_VERSION`, re-enter each merchant’s Razorpay Test credentials from the dashboard, verify the new configuration, then retire the old key only after all active configurations have moved. Merchant API-key rotation creates a replacement and revokes the old key atomically; copy the replacement immediately because it is shown only once.
 
 ## Architecture
 
