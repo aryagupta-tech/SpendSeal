@@ -1,0 +1,50 @@
+name: agentrail
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: agentrail
+      POSTGRES_USER: agentrail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentrail-local-only}
+    volumes:
+      - agentrail-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentrail -d agentrail"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    image: agentrail:local
+    build:
+      context: .
+      target: runtime
+    init: true
+    ports:
+      - "${ORBSTACK_PORT:-43118}:43117"
+    environment:
+      NODE_ENV: production
+      PORT: 43117
+      HOST: 0.0.0.0
+      PUBLIC_BASE_URL: ${DOCKER_PUBLIC_BASE_URL:-http://localhost:43118}
+      DATABASE_URL: postgresql://agentrail:${POSTGRES_PASSWORD:-agentrail-local-only}@postgres:5432/agentrail
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      CREDENTIAL_ENCRYPTION_KEY_VERSION: ${CREDENTIAL_ENCRYPTION_KEY_VERSION:-1}
+      OAUTH_ISSUER: ${DOCKER_PUBLIC_BASE_URL:-http://localhost:43118}
+      WEBAUTHN_RP_ID: ${DOCKER_WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_ORIGIN: ${DOCKER_WEBAUTHN_ORIGIN:-http://localhost:43118}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-AgentRail}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
+      SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-8}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  agentrail-postgres:

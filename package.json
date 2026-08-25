@@ -1,0 +1,35 @@
+{
+  "name": "agentrail",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "predev": "npm run build -w @agentrail/core && npm run build -w @agentrail/server",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @agentrail/server\" \"npm run dev -w @agentrail/web\"",
+    "build": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run build -w @agentrail/web",
+    "db:migrate": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run migrate -w @agentrail/server",
+    "demo:seed": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run seed -w @agentrail/server",
+    "typecheck": "tsc -b",
+    "pretest": "npm run build -w @agentrail/core",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "playwright test",
+    "start": "npm run start -w @agentrail/server"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.3.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

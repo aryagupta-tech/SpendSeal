@@ -1,0 +1,129 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowRight, Bot, CheckCircle2, CircleDollarSign, Copy, Fingerprint, KeyRound, LockKeyhole, LogOut, PackagePlus, RefreshCw, ShieldCheck, Siren, Store } from "lucide-react";
+import type { CreateIntentInput, IntentLock, Merchant, Product } from "@agentrail/core";
+import { Link, useNavigate } from "react-router-dom";
+import { api, money } from "../api";
+import { Badge, ErrorNotice, Reveal, SectionTitle } from "../components";
+import type { IntentResponse, MerchantList, ProductList, Session } from "../types";
+
+type Health = { ok: boolean; database: string; mode: "demo" | "standard" };
+type PaymentConfiguration = { adapter: "mock" | "razorpay"; keyId: string | null; version: number; connected: boolean; webhookUrl: string };
+type ApiKeyRecord = { id: string; name: string; prefix: string; scopes: string[]; revokedAt: string | null };
+
+const emptyProduct = { sku: "", name: "", description: "", priceRupees: 999, refundable: true, refundWindowDays: 7 };
+
+export function Dashboard() {
+  const navigate = useNavigate();
+  const [session, setSession] = useState<Session | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [ownedMerchants, setOwnedMerchants] = useState<Merchant[]>([]);
+  const [catalogMerchants, setCatalogMerchants] = useState<Merchant[]>([]);
+  const [merchantId, setMerchantId] = useState("");
+  const [products, setProducts] = useState<Product[]>([]);
+  const [intents, setIntents] = useState<IntentLock[]>([]);
+  const [payment, setPayment] = useState<PaymentConfiguration | null>(null);
+  const [apiKeys, setApiKeys] = useState<ApiKeyRecord[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [merchantForm, setMerchantForm] = useState({ displayName: "", slug: "" });
+  const [productForm, setProductForm] = useState(emptyProduct);
+  const [razorpayForm, setRazorpayForm] = useState({ keyId: "", keySecret: "" });
+  const [revealedSecret, setRevealedSecret] = useState<{ label: string; value: string } | null>(null);
+  const [created, setCreated] = useState<IntentResponse | null>(null);
+  const [selectedProductId, setSelectedProductId] = useState("");
+  const selectedProduct = products.find((value) => value.id === selectedProductId) ?? products[0];
+  const [constraints, setConstraints] = useState({ maxRupees: 1100, priceChangePolicy: "none" as CreateIntentInput["priceChangePolicy"], requireRefundable: true, minimumRefundWindowDays: 7, expiresInMinutes: 10 });
+
+  const load = useCallback(async () => {
+    try {
+      const [sessionResult, healthResult, owned, catalog, intentResult] = await Promise.all([
+        api<Session>("/api/v1/auth/session"), api<Health>("/api/v1/health"), api<MerchantList>("/api/v1/merchants"), api<MerchantList>("/api/v1/catalog/merchants"), api<{ intents: IntentLock[] }>("/api/v1/intents"),
+      ]);
+      setSession(sessionResult); setHealth(healthResult); setOwnedMerchants(owned.merchants); setCatalogMerchants(catalog.merchants); setIntents(intentResult.intents);
+      setMerchantId((current) => current || owned.merchants[0]?.id || catalog.merchants[0]?.id || ""); setError("");
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "AUTH_REQUIRED") { navigate("/login", { replace: true }); return; }
+      setError(cause instanceof Error ? cause.message : "AgentRail could not load");
+    } finally { setLoading(false); }
+  }, [navigate]);
+
+  const loadMerchant = useCallback(async () => {
+    if (!merchantId) { setProducts([]); setPayment(null); setApiKeys([]); return; }
+    try {
+      const productResult = await api<ProductList>(`/api/v1/catalog/merchants/${merchantId}/products`); setProducts(productResult.products); setSelectedProductId((current) => productResult.products.some((p) => p.id === current) ? current : productResult.products[0]?.id ?? "");
+      if (ownedMerchants.some((merchant) => merchant.id === merchantId)) {
+        const [configuration, keys] = await Promise.all([api<{ configuration: PaymentConfiguration | null }>(`/api/v1/merchants/${merchantId}/payment-configuration`), api<{ apiKeys: ApiKeyRecord[] }>(`/api/v1/merchants/${merchantId}/api-keys`).catch(() => ({ apiKeys: [] }))]);
+        setPayment(configuration.configuration); setApiKeys(keys.apiKeys);
+      } else { setPayment(null); setApiKeys([]); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Merchant could not load"); }
+  }, [merchantId, ownedMerchants]);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void loadMerchant(); }, [loadMerchant]);
+
+  const selectedMerchant = [...ownedMerchants, ...catalogMerchants].find((merchant) => merchant.id === merchantId);
+  const canManage = ownedMerchants.some((merchant) => merchant.id === merchantId);
+  const paid = intents.filter((intent) => intent.status === "paid").length;
+  const denied = intents.filter((intent) => intent.status === "denied" || intent.status === "expired").length;
+
+  async function run(label: string, action: () => Promise<void>) { setBusy(label); setError(""); try { await action(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Operation failed"); } finally { setBusy(""); } }
+  async function createMerchant() { await run("merchant", async () => { const result = await api<{ merchant: Merchant }>("/api/v1/merchants", { method: "POST", body: JSON.stringify(merchantForm) }); setMerchantForm({ displayName: "", slug: "" }); await load(); setMerchantId(result.merchant.id); }); }
+  async function createProduct() { if (!merchantId) return; await run("product", async () => { await api(`/api/v1/merchants/${merchantId}/products`, { method: "POST", body: JSON.stringify({ sku: productForm.sku, name: productForm.name, description: productForm.description, pricePaise: productForm.priceRupees * 100, refundable: productForm.refundable, refundWindowDays: productForm.refundable ? productForm.refundWindowDays : 0, active: true }) }); setProductForm(emptyProduct); await loadMerchant(); }); }
+  async function connectMock() { await run("mock", async () => { await api(`/api/v1/merchants/${merchantId}/payment-configuration`, { method: "PUT", body: JSON.stringify({ adapter: "mock" }) }); await loadMerchant(); }); }
+  async function connectRazorpay() { await run("razorpay", async () => { const result = await api<{ webhookSecret: string; configuration: PaymentConfiguration }>(`/api/v1/merchants/${merchantId}/payment-configuration`, { method: "PUT", body: JSON.stringify({ adapter: "razorpay", ...razorpayForm }) }); setRevealedSecret({ label: "Razorpay webhook secret (shown once)", value: result.webhookSecret }); setRazorpayForm({ keyId: "", keySecret: "" }); await loadMerchant(); }); }
+  async function createApiKey() { await run("api-key", async () => { const result = await api<{ key: string }>(`/api/v1/merchants/${merchantId}/api-keys`, { method: "POST", body: JSON.stringify({ name: "Catalog integration", scopes: ["catalog:read", "catalog:write", "orders:read", "audit:read"], expiresAt: null }) }); setRevealedSecret({ label: "Merchant API key (shown once)", value: result.key }); await loadMerchant(); }); }
+  async function createIntent() { if (!selectedProduct) return; await run("intent", async () => { const result = await api<IntentResponse>("/api/v1/intents", { method: "POST", body: JSON.stringify({ merchantId: selectedProduct.merchantId, productId: selectedProduct.id, maxTotalPaise: constraints.maxRupees * 100, priceChangePolicy: constraints.priceChangePolicy, requireRefundable: constraints.requireRefundable, minimumRefundWindowDays: constraints.requireRefundable ? constraints.minimumRefundWindowDays : null, expiresInMinutes: constraints.expiresInMinutes }) }); setCreated(result); await load(); }); }
+  async function attack() { if (!selectedProduct || !canManage) return; await run("attack", async () => { await api(`/api/v1/merchants/${merchantId}/products/${selectedProduct.id}`, { method: "PATCH", body: JSON.stringify({ expectedVersion: selectedProduct.version, changes: { pricePaise: selectedProduct.pricePaise + 30_000 } }) }); await loadMerchant(); }); }
+  async function seedDemo() { await run("seed", async () => { const result = await api<{ merchant: Merchant }>("/api/v1/demo/seed", { method: "POST" }); await load(); setMerchantId(result.merchant.id); }); }
+  async function logout() { await api("/api/v1/auth/logout", { method: "POST" }); navigate("/login", { replace: true }); }
+
+  if (loading) return <div className="route-stage"><div className="route-glow" /><div className="trust-preview relative animate-pulse p-8 text-white/45">Loading your multi-merchant authorization platform…</div></div>;
+  return <div>
+    <section className="hero-stage relative mx-auto flex max-w-[1460px] flex-col items-center overflow-hidden px-5 pb-16 pt-16 text-center lg:px-8"><div className="hero-halo pointer-events-none" /><div className="orbit-ring pointer-events-none" /><div className="relative z-10 max-w-4xl">
+      <div className="mb-5 flex flex-wrap justify-center gap-2"><Badge tone="good"><span className="status-pulse" /> PostgreSQL ready</Badge><Badge tone="good">Passkey session</Badge><Badge>{health?.mode === "demo" ? "Optional demo enabled" : "Empty-by-default platform"}</Badge></div>
+      <p className="eyebrow">Merchant-owned catalog · buyer-owned constraints</p><h1 className="mt-5 text-5xl font-semibold leading-[.98] tracking-[-.06em] sm:text-6xl">The authorization firewall for <span className="text-mint">any merchant.</span></h1>
+      <p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-white/52">Merchants publish authoritative products. Buyers set limits. ChatGPT interprets intent. Passkeys authorize. AgentRail enforces. Razorpay Test Mode executes.</p>
+      <div className="mt-7 flex flex-wrap justify-center gap-2"><span className="pipeline-node"><Bot size={15} className="text-mint" /> ChatGPT</span><span className="pipeline-node"><Fingerprint size={15} className="text-mint" /> Passkey</span><span className="pipeline-node"><ShieldCheck size={15} className="text-mint" /> Policy</span><span className="pipeline-node"><CircleDollarSign size={15} className="text-mint" /> Razorpay</span></div>
+    </div></section>
+
+    <main className="mx-auto max-w-[1460px] space-y-8 px-5 pb-10 lg:px-8">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><div><p className="text-sm font-semibold">Signed in as {session?.user.displayName}</p><p className="text-xs text-white/35">{session?.user.username}</p></div><button className="button-secondary !px-3 !py-2" onClick={logout}><LogOut size={14} /> Sign out</button></div>
+      {error && <ErrorNotice message={error} />}{revealedSecret && <OneTimeSecret {...revealedSecret} onClose={() => setRevealedSecret(null)} />}
+      <Reveal className="grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Your merchants" value={ownedMerchants.length} /><Metric label="Catalog products" value={products.length} /><Metric label="Blocked intents" value={denied} /><Metric label="Paid test orders" value={paid} /></Reveal>
+
+      <Reveal className="grid gap-8 xl:grid-cols-[.8fr_1.2fr]">
+        <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Merchant onboarding" title="Create your trust domain" />
+          <div className="grid gap-3"><label><span className="label">Merchant name</span><input className="field" value={merchantForm.displayName} onChange={(e) => setMerchantForm({ ...merchantForm, displayName: e.target.value })} placeholder="Acme Store" /></label><label><span className="label">URL slug</span><input className="field" value={merchantForm.slug} onChange={(e) => setMerchantForm({ ...merchantForm, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "") })} placeholder="acme-store" /></label><button className="button-primary" disabled={busy === "merchant" || !merchantForm.displayName || !merchantForm.slug} onClick={createMerchant}><Store size={16} /> Create merchant</button></div>
+          {health?.mode === "demo" && <button className="button-secondary mt-3 w-full" onClick={seedDemo} disabled={busy === "seed"}><RefreshCw size={14} /> Seed optional NovaDesk demo</button>}
+        </section>
+        <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Tenant selector" title="Choose a merchant" aside={<Badge>{catalogMerchants.length} discoverable</Badge>} />
+          {catalogMerchants.length ? <div className="grid gap-3 sm:grid-cols-2">{catalogMerchants.map((merchant) => <button key={merchant.id} onClick={() => setMerchantId(merchant.id)} className={`interactive-card p-4 text-left ${merchant.id === merchantId ? "border-mint/30 bg-mint/[.06]" : ""}`}><p className="font-semibold">{merchant.displayName}</p><p className="mt-1 font-mono text-[9px] text-white/35">{merchant.slug} · {ownedMerchants.some((value) => value.id === merchant.id) ? "MANAGED BY YOU" : "BUYER VIEW"}</p></button>)}</div> : <Empty title="No merchants yet" text="Create the first merchant. AgentRail starts with an empty catalog—there are no fictional products unless you explicitly seed the demo." />}
+        </section>
+      </Reveal>
+
+      {selectedMerchant && <Reveal className="grid gap-8 xl:grid-cols-[1.1fr_.9fr]">
+        <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow={`${selectedMerchant.displayName} · merchant-managed catalog`} title="Authoritative products" aside={<Badge>{canManage ? "Manager view" : "Buyer view"}</Badge>} />
+          {products.length ? <div className="grid gap-3 md:grid-cols-2">{products.map((product) => <button key={product.id} onClick={() => setSelectedProductId(product.id)} className={`interactive-card p-5 text-left ${selectedProduct?.id === product.id ? "border-mint/30 bg-mint/[.055]" : ""}`}><div className="flex justify-between gap-3"><p className="font-semibold">{product.name}</p><Badge tone={product.refundable ? "good" : "neutral"}>{product.refundable ? `Stated ${product.refundWindowDays}d` : "Final sale"}</Badge></div><p className="mt-2 text-xs leading-5 text-white/40">{product.description || product.sku}</p><p className="mt-5 text-2xl font-semibold">{money(product.pricePaise)}</p><p className="mt-1 font-mono text-[9px] text-white/30">REVISION {product.version} · {product.snapshotHash.slice(0, 12)}</p></button>)}</div> : <Empty title="This catalog is empty" text={canManage ? "Publish a real product using the form beside this panel." : "This merchant has not published any products yet."} />}
+        </section>
+        {canManage ? <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Immutable revisions" title="Publish a product" /><div className="grid gap-3 sm:grid-cols-2"><Field label="SKU" value={productForm.sku} set={(value) => setProductForm({ ...productForm, sku: value })} /><Field label="Name" value={productForm.name} set={(value) => setProductForm({ ...productForm, name: value })} /><Field label="Price (₹)" type="number" value={String(productForm.priceRupees)} set={(value) => setProductForm({ ...productForm, priceRupees: Number(value) })} /><Field label="Refund window days" type="number" value={String(productForm.refundWindowDays)} set={(value) => setProductForm({ ...productForm, refundWindowDays: Number(value) })} /></div><label className="mt-3 block"><span className="label">Description</span><textarea className="field min-h-20" value={productForm.description} onChange={(e) => setProductForm({ ...productForm, description: e.target.value })} /></label><label className="mt-3 flex items-center gap-3 text-sm text-white/55"><input type="checkbox" checked={productForm.refundable} onChange={(e) => setProductForm({ ...productForm, refundable: e.target.checked })} /> Merchant states this is refundable</label><button className="button-primary mt-4 w-full" onClick={createProduct} disabled={busy === "product" || !productForm.sku || !productForm.name}><PackagePlus size={16} /> Publish product revision</button></section> : <section className="section-shell p-5 sm:p-7"><Empty title="Buyer discovery" text="You can select authoritative products and set spending constraints. You cannot invent the price or refund terms." /></section>}
+      </Reveal>}
+
+      {selectedMerchant && <Reveal className="grid gap-8 xl:grid-cols-2">
+        <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Buyer authorization" title="Build an IntentLock" aside={<Badge>Structured fallback</Badge>} />
+          {selectedProduct ? <><p className="rounded-xl border border-mint/15 bg-mint/[.04] p-3 text-sm"><strong>{selectedProduct.name}</strong> · authoritative price {money(selectedProduct.pricePaise)}</p><div className="mt-4 grid gap-3 sm:grid-cols-2"><Field label="Maximum spend (₹)" type="number" value={String(constraints.maxRupees)} set={(value) => setConstraints({ ...constraints, maxRupees: Number(value) })} /><label><span className="label">Price changes</span><select className="field" value={constraints.priceChangePolicy} onChange={(e) => setConstraints({ ...constraints, priceChangePolicy: e.target.value as CreateIntentInput["priceChangePolicy"] })}><option value="none">No changes</option><option value="decrease_only">Decreases only</option><option value="within_cap">Within my cap</option></select></label></div><label className="mt-3 flex items-center gap-3 text-sm text-white/55"><input type="checkbox" checked={constraints.requireRefundable} onChange={(e) => setConstraints({ ...constraints, requireRefundable: e.target.checked })} /> Require merchant-stated refundable terms</label><button className="button-primary mt-4 w-full" onClick={createIntent} disabled={busy === "intent"}><LockKeyhole size={16} /> Create buyer-bound mandate</button>{created && <div className="mt-4 rounded-xl border border-mint/20 bg-mint/[.06] p-4"><p className="font-semibold">IntentLock created</p><p className="mt-1 text-xs text-white/40">The approval link works only for this signed-in buyer and still requires a passkey assertion.</p><a className="button-primary mt-3 w-full" href={created.approvalUrl}>Review and approve <ArrowRight size={15} /></a></div>}</> : <Empty title="Select a product first" text="IntentLocks can only reference an existing authoritative product revision." />}
+        </section>
+        <section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Attack simulator" title="Prove changed terms are blocked" />{canManage && selectedProduct ? <><p className="text-sm leading-6 text-white/45">Create an IntentLock, then raise the selected product by ₹300. A new immutable revision is created. At checkout AgentRail reloads it and emits deterministic denial evidence.</p><button className="button-secondary mt-5 w-full border-red-400/20 text-red-200" onClick={attack} disabled={busy === "attack"}><Siren size={16} /> Raise {selectedProduct.name} by ₹300</button></> : <Empty title="Merchant role required" text="Only a merchant member can modify catalog terms. Buyers can observe but cannot run this simulator." />}</section>
+      </Reveal>}
+
+      {canManage && selectedMerchant && <Reveal className="grid gap-8 xl:grid-cols-2"><section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Merchant-isolated payment adapter" title="Connect Razorpay Test Mode" aside={payment ? <Badge tone="good">{payment.adapter} v{payment.version}</Badge> : <Badge tone="warn">Not connected</Badge>} /><button className="button-secondary w-full" onClick={connectMock} disabled={busy === "mock"}>Use deterministic mock adapter</button><div className="my-4 border-t border-white/[.08]" /><div className="grid gap-3"><Field label="Razorpay Test Key ID" value={razorpayForm.keyId} set={(value) => setRazorpayForm({ ...razorpayForm, keyId: value })} placeholder="rzp_test_…" /><Field label="Razorpay Test Key Secret" type="password" value={razorpayForm.keySecret} set={(value) => setRazorpayForm({ ...razorpayForm, keySecret: value })} /><button className="button-primary" onClick={connectRazorpay} disabled={!razorpayForm.keyId.startsWith("rzp_test_") || !razorpayForm.keySecret}>Encrypt and connect Test Mode</button></div><p className="mt-3 text-xs leading-5 text-white/35">Secrets are AES-256-GCM encrypted, never returned later, and isolated per merchant. Live keys are rejected.</p></section><section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Scoped machine access" title="Merchant API keys" aside={<Badge>{apiKeys.length} keys</Badge>} /><button className="button-secondary w-full" onClick={createApiKey} disabled={busy === "api-key"}><KeyRound size={15} /> Generate scoped test key</button><div className="mt-4 space-y-2">{apiKeys.map((key) => <div key={key.id} className="rounded-xl border border-white/[.07] p-3"><p className="text-sm font-medium">{key.name}</p><p className="mt-1 font-mono text-[9px] text-white/35">{key.prefix}… · {key.revokedAt ? "REVOKED" : key.scopes.join(", ")}</p></div>)}</div></section></Reveal>}
+
+      <Reveal><section className="section-shell p-5 sm:p-7"><SectionTitle eyebrow="Buyer-owned history" title="IntentLocks and audit evidence" aside={<Badge>{intents.length} mandates</Badge>} />{intents.length ? <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="text-[10px] uppercase tracking-wider text-white/30"><tr><th className="pb-3">Intent</th><th>Merchant</th><th>Limit</th><th>Status</th><th>Evidence</th></tr></thead><tbody>{intents.map((intent) => <tr key={intent.id} className="border-t border-white/[.07]"><td className="py-4 font-mono text-xs">{intent.id.slice(0, 12)}…</td><td>{catalogMerchants.find((m) => m.id === intent.merchantId)?.displayName ?? intent.merchantId.slice(0, 8)}</td><td>{money(intent.maxTotalPaise)}</td><td><Badge tone={intent.status === "paid" ? "good" : intent.status === "denied" ? "bad" : "neutral"}>{intent.status.replaceAll("_", " ")}</Badge></td><td><Link className="text-mint hover:underline" to={`/audit/${intent.id}`}>Open chain →</Link></td></tr>)}</tbody></table></div> : <Empty title="No IntentLocks yet" text="Choose a merchant product and create your first bounded purchase mandate." />}</section></Reveal>
+    </main>
+  </div>;
+}
+
+function Field({ label, value, set, type = "text", placeholder }: { label: string; value: string; set: (value: string) => void; type?: string; placeholder?: string }) { return <label><span className="label">{label}</span><input className="field" type={type} value={value} placeholder={placeholder} onChange={(e) => set(e.target.value)} /></label>; }
+function Empty({ title, text }: { title: string; text: string }) { return <div className="rounded-2xl border border-dashed border-white/[.12] bg-black/10 p-6 text-center"><Store className="mx-auto text-white/25" /><p className="mt-3 font-semibold">{title}</p><p className="mx-auto mt-2 max-w-md text-xs leading-5 text-white/38">{text}</p></div>; }
+function Metric({ label, value }: { label: string; value: number }) { return <div className="interactive-card p-5"><CheckCircle2 size={16} className="text-mint" /><p className="mt-5 text-2xl font-semibold">{value}</p><p className="mt-1 text-xs text-white/40">{label}</p></div>; }
+function OneTimeSecret({ label, value, onClose }: { label: string; value: string; onClose: () => void }) { return <div className="rounded-2xl border border-amber-300/25 bg-amber-300/[.06] p-4"><p className="text-sm font-semibold text-amber-100">{label}</p><p className="mt-1 text-xs text-white/45">Copy this now. AgentRail stores only a hash or encrypted value and will not show it again.</p><div className="mt-3 flex gap-2"><code className="min-w-0 flex-1 overflow-auto rounded-lg bg-black/30 p-3 text-xs">{value}</code><button className="button-secondary !px-3" onClick={() => navigator.clipboard.writeText(value)}><Copy size={15} /></button><button className="button-secondary !px-3" onClick={onClose}>Done</button></div></div>; }

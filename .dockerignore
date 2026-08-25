@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+**/dist
+data
+*.db
+*.db-shm
+*.db-wal
+coverage
+playwright-report
+test-results
+.DS_Store
+npm-debug.log*
