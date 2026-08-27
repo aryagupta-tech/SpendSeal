@@ -20,13 +20,18 @@ export function Login() {
   async function submit() {
     setBusy(true); setError("");
     try {
+      const normalizedUsername = username.trim();
+      const normalizedDisplayName = displayName.trim();
+      if (normalizedUsername.length < 3) throw new Error("Username must contain at least 3 characters.");
+      if (!/^[a-zA-Z0-9@._+-]+$/.test(normalizedUsername)) throw new Error("Username can only use letters, numbers, and @ . _ + - characters.");
+      if (mode === "register" && !normalizedDisplayName) throw new Error("Display name is required.");
       if (!("PublicKeyCredential" in window)) throw new Error("This browser does not support passkeys.");
       if (mode === "register") {
-        const start = await api<RegistrationOptions>("/api/v1/auth/passkeys/register/options", { method: "POST", body: JSON.stringify({ username, displayName }) });
+        const start = await api<RegistrationOptions>("/api/v1/auth/passkeys/register/options", { method: "POST", body: JSON.stringify({ username: normalizedUsername, displayName: normalizedDisplayName }) });
         const response = await startRegistration({ optionsJSON: start.options });
         await api("/api/v1/auth/passkeys/register/verify", { method: "POST", body: JSON.stringify({ challengeId: start.challengeId, response }) });
       } else {
-        const start = await api<AuthenticationOptions>("/api/v1/auth/passkeys/login/options", { method: "POST", body: JSON.stringify({ username }) });
+        const start = await api<AuthenticationOptions>("/api/v1/auth/passkeys/login/options", { method: "POST", body: JSON.stringify({ username: normalizedUsername }) });
         const response = await startAuthentication({ optionsJSON: start.options });
         await api("/api/v1/auth/passkeys/login/verify", { method: "POST", body: JSON.stringify({ challengeId: start.challengeId, response }) });
       }
@@ -41,9 +46,9 @@ export function Login() {
     <p className="mt-3 text-sm leading-6 text-white/45">One account can buy products and manage any merchants it belongs to. The passkey proves control of your authenticator—not KYC or legal identity.</p>
     {error && <div className="mt-5"><ErrorNotice message={error} /></div>}
     <div className="mt-6 space-y-4">
-      <label><span className="label">Username</span><input className="field" autoComplete="username webauthn" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="arya" /></label>
-      {mode === "register" && <label><span className="label">Display name</span><input className="field" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Arya" /></label>}
-      <button className="button-primary w-full" onClick={submit} disabled={busy || username.length < 3 || (mode === "register" && !displayName)}><Fingerprint size={17} />{busy ? "Waiting for authenticator…" : mode === "register" ? "Create account with passkey" : "Sign in with passkey"}</button>
+      <label><span className="label">Username</span><input className="field" autoComplete="username webauthn" maxLength={120} value={username} onChange={(event) => setUsername(event.target.value)} onBlur={() => setUsername((value) => value.trim())} placeholder="arya" /></label>
+      {mode === "register" && <label><span className="label">Display name</span><input className="field" maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} onBlur={() => setDisplayName((value) => value.trim())} placeholder="Arya" /></label>}
+      <button className="button-primary w-full" onClick={submit} disabled={busy || username.trim().length < 3 || (mode === "register" && !displayName.trim())}><Fingerprint size={17} />{busy ? "Waiting for authenticator…" : mode === "register" ? "Create account with passkey" : "Sign in with passkey"}</button>
     </div>
     <button className="mt-5 w-full text-sm text-white/45 hover:text-white" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>{mode === "register" ? "Already registered? Sign in" : "New here? Create an account"}</button>
   </div></div>;

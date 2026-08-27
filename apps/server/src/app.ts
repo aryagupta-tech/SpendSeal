@@ -41,12 +41,16 @@ export function createApp(config: Config, store: AgentRailStore) {
   app.get("/api/v1/health", asyncHandler(async (_req, res) => { await store.health(); res.json({ ok: true, database: "postgresql", migrations: "ready", mode: config.demoMode ? "demo" : "standard" }); }));
 
   app.post("/api/v1/auth/passkeys/register/options", limit(store, "register", 10, 300), asyncHandler(async (req, res) => {
-    const input = z.object({ username: z.string().min(3).max(120).regex(/^[a-zA-Z0-9@._+-]+$/), displayName: z.string().min(1).max(120) }).parse(req.body); res.json(await webauthn.registrationOptions(input.username, input.displayName));
+    const input = z.object({
+      username: z.string().trim().min(3).max(120).regex(/^[a-zA-Z0-9@._+-]+$/),
+      displayName: z.string().trim().min(1).max(120),
+    }).parse(req.body);
+    res.json(await webauthn.registrationOptions(input.username, input.displayName));
   }));
   app.post("/api/v1/auth/passkeys/register/verify", limit(store, "register_verify", 10, 300), asyncHandler(async (req, res) => {
     const input = z.object({ challengeId: z.string().uuid(), response: z.unknown() }).parse(req.body); const verified = await webauthn.verifyRegistration(input.challengeId, input.response as RegistrationResponseJSON); const session = await store.createSession(verified.user.id, config.sessionIdleMinutes, config.sessionAbsoluteHours); setSession(res, session, config); res.status(201).json({ user: verified.user, csrfToken: session.csrf });
   }));
-  app.post("/api/v1/auth/passkeys/login/options", limit(store, "login", 12, 300), asyncHandler(async (req, res) => { const input = z.object({ username: z.string().min(3).max(120) }).parse(req.body); res.json(await webauthn.loginOptions(input.username)); }));
+  app.post("/api/v1/auth/passkeys/login/options", limit(store, "login", 12, 300), asyncHandler(async (req, res) => { const input = z.object({ username: z.string().trim().min(3).max(120) }).parse(req.body); res.json(await webauthn.loginOptions(input.username)); }));
   app.post("/api/v1/auth/passkeys/login/verify", limit(store, "login_verify", 12, 300), asyncHandler(async (req, res) => {
     const input = z.object({ challengeId: z.string().uuid(), response: z.unknown() }).parse(req.body); const verified = await webauthn.verifyLogin(input.challengeId, input.response as AuthenticationResponseJSON); const session = await store.createSession(verified.user.id, config.sessionIdleMinutes, config.sessionAbsoluteHours); setSession(res, session, config); res.json({ user: verified.user, csrfToken: session.csrf });
   }));
