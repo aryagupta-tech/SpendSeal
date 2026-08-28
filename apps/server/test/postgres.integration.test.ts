@@ -75,6 +75,14 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect((await store.authenticateApiKey(created.key))?.merchantId).toBe(merchant.id); await store.revokeApiKey(merchant.id, created.id); expect(await store.authenticateApiKey(created.key)).toBeNull();
   });
 
+  it("does not rotate an unchanged Razorpay Test configuration on repeated import", async () => {
+    const owner = await user("payment-owner"); const merchant = await store.createMerchant(owner.id, { slug: "payment-shop", displayName: "Payment Shop" });
+    await store.savePaymentConfig(merchant.id, { adapter: "razorpay", keyId: "rzp_test_idempotent", keySecretCiphertext: service.vault.encrypt("same-test-secret"), webhookSecretCiphertext: service.vault.encrypt("webhook-secret"), encryptionKeyVersion: service.vault.version });
+    const result = await service.configurePayments(merchant.id, { adapter: "razorpay", keyId: "rzp_test_idempotent", keySecret: "same-test-secret" });
+    expect(result.alreadyConnected).toBe(true); expect(result.configuration.version).toBe(1); expect(result.webhookSecret).toBeUndefined();
+    const count = await pool.query("SELECT count(*)::int AS count FROM merchant_payment_configurations WHERE merchant_id=$1", [merchant.id]); expect(count.rows[0].count).toBe(1);
+  });
+
   it("rejects audit mutation and detects offline tampering", async () => {
     const setup = await approvedIntent(); expect((await store.verifyAudit("intent", setup.intent.id)).valid).toBe(true);
     await expect(pool.query("UPDATE audit_events SET payload_json='{}' WHERE scope_type='intent' AND scope_id=$1", [setup.intent.id])).rejects.toThrow(/append-only/);

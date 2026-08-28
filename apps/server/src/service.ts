@@ -90,8 +90,11 @@ export class AgentRailService {
     return this.verifyPayment({ localOrderId, razorpayOrderId: order.providerOrderId, razorpayPaymentId: paymentId, razorpaySignature: adapter.sign(order.providerOrderId, paymentId) });
   }
 
-  async configurePayments(merchantId: string, input: { adapter: "mock" | "razorpay"; keyId?: string; keySecret?: string }): Promise<{ configuration: { adapter: string; keyId: string | null; version: number }; webhookSecret?: string }> {
+  async configurePayments(merchantId: string, input: { adapter: "mock" | "razorpay"; keyId?: string; keySecret?: string }): Promise<{ configuration: { adapter: string; keyId: string | null; version: number }; webhookSecret?: string; alreadyConnected?: boolean }> {
     if (input.adapter === "razorpay" && (!input.keyId?.startsWith("rzp_test_") || !input.keySecret)) throw new AgentRailError(400, "TEST_KEYS_REQUIRED", "Only complete Razorpay Test Mode credentials are accepted.");
+    const existing = await this.store.paymentConfig(merchantId);
+    if (input.adapter === "razorpay" && existing?.adapter === "razorpay" && existing.keyId === input.keyId && existing.keySecretCiphertext && this.vault.decrypt(existing.keySecretCiphertext) === input.keySecret) return { configuration: { adapter: existing.adapter, keyId: existing.keyId, version: existing.version }, alreadyConnected: true };
+    if (input.adapter === "mock" && existing?.adapter === "mock") return { configuration: { adapter: existing.adapter, keyId: existing.keyId, version: existing.version }, alreadyConnected: true };
     if (input.adapter === "razorpay") { try { await new RazorpayPaymentAdapter(input.keyId!, input.keySecret!).verifyConnection(); } catch { throw new AgentRailError(400, "RAZORPAY_CREDENTIALS_INVALID", "Razorpay rejected these Test Mode credentials or could not be reached."); } }
     const webhookSecret = input.adapter === "razorpay" ? randomBytes(32).toString("hex") : undefined;
     const saved = await this.store.savePaymentConfig(merchantId, { adapter: input.adapter, keyId: input.adapter === "razorpay" ? input.keyId! : null, keySecretCiphertext: input.adapter === "razorpay" ? this.vault.encrypt(input.keySecret!) : null, webhookSecretCiphertext: webhookSecret ? this.vault.encrypt(webhookSecret) : null, encryptionKeyVersion: this.vault.version });
