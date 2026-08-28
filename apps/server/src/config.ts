@@ -26,7 +26,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     port: Number(process.env.PORT ?? 43117),
     host: process.env.HOST ?? "127.0.0.1",
     publicBaseUrl,
-    databaseUrl: process.env.DATABASE_URL ?? "postgresql://agentrail:agentrail-local-only@127.0.0.1:5432/agentrail",
+    databaseUrl: process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? "postgresql://agentrail:agentrail-local-only@127.0.0.1:5432/agentrail",
     credentialEncryptionKey: key,
     credentialEncryptionKeyVersion: Number(process.env.CREDENTIAL_ENCRYPTION_KEY_VERSION ?? 1),
     oauthIssuer: process.env.OAUTH_ISSUER ?? publicBaseUrl,
