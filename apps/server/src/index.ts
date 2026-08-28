@@ -2,12 +2,12 @@ import "./env.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createDatabase, runMigrations } from "./db/client.js";
-import { AgentRailStore } from "./store.js";
+import { SpendSealStore } from "./store.js";
 
 const config = loadConfig();
 const { pool } = createDatabase(config.databaseUrl);
 await runMigrations(pool);
-const store = new AgentRailStore(pool);
+const store = new SpendSealStore(pool);
 const { app } = createApp(config, store);
 
 const server = app.listen(config.port, config.host, () => {

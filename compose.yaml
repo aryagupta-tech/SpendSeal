@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: agentrail:local
+    image: spendseal:local
     build:
       context: .
       target: runtime
@@ -37,7 +37,7 @@ services:
       OAUTH_ISSUER: ${DOCKER_PUBLIC_BASE_URL:-http://localhost:43118}
       WEBAUTHN_RP_ID: ${DOCKER_WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_ORIGIN: ${DOCKER_WEBAUTHN_ORIGIN:-http://localhost:43118}
-      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-AgentRail}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-SpendSeal}
       DEMO_MODE: ${DEMO_MODE:-false}
       SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
       SESSION_ABSOLUTE_HOURS: ${SESSION_ABSOLUTE_HOURS:-8}
@@ -49,4 +49,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  # Historical storage name retained so the brand rename never replaces existing data.
   agentrail-postgres:

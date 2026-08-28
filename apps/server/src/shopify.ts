@@ -28,14 +28,14 @@ export class ShopifyAdminClient {
 
   async verify(): Promise<ShopifyConnectionDetails> {
     const data = await this.query<{ shop: { name: string; currencyCode: string }; currentAppInstallation: { accessScopes: Array<{ handle: string }> } | null }>(`
-      query AgentRailConnectionCheck {
+      query SpendSealConnectionCheck {
         shop { name currencyCode }
         currentAppInstallation { accessScopes { handle } }
       }
     `);
     const scopes = data.currentAppInstallation?.accessScopes.map((scope) => scope.handle) ?? [];
     if (!scopes.includes("read_products")) throw new ShopifyError("SHOPIFY_SCOPE_MISSING", "The Shopify app must have the read_products Admin API scope.");
-    if (data.shop.currencyCode !== "INR") throw new ShopifyError("SHOPIFY_CURRENCY_UNSUPPORTED", `This AgentRail build supports INR catalogs; the Shopify store currently uses ${data.shop.currencyCode}.`);
+    if (data.shop.currencyCode !== "INR") throw new ShopifyError("SHOPIFY_CURRENCY_UNSUPPORTED", `This SpendSeal build supports INR catalogs; the Shopify store currently uses ${data.shop.currencyCode}.`);
     return { shopDomain: this.shopDomain, shopName: data.shop.name, currency: data.shop.currencyCode };
   }
 
@@ -52,7 +52,7 @@ export class ShopifyAdminClient {
           pageInfo: { hasNextPage: boolean; endCursor: string | null };
         };
       } = await this.query(`
-        query AgentRailProducts($cursor: String) {
+        query SpendSealProducts($cursor: String) {
           productVariants(first: 100, after: $cursor) {
             nodes {
               id title sku price updatedAt availableForSale

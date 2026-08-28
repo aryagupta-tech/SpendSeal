@@ -1,8 +1,8 @@
-# AgentRail
+# SpendSeal
 
-> Merchants publish authoritative products. Buyers choose products and limits. ChatGPT interprets intent. Passkeys authorize. AgentRail enforces. Razorpay executes.
+> Merchants publish authoritative products. Buyers choose products and limits. ChatGPT interprets intent. Passkeys authorize. SpendSeal enforces. Razorpay executes.
 
-AgentRail is a multi-merchant authorization firewall for AI-initiated payments, built for Razorpay AI Buildathon Track 01. It starts with an empty catalog. NovaDesk is optional demo data, not the product model.
+SpendSeal is a multi-merchant authorization firewall for AI-initiated payments, built for Razorpay AI Buildathon Track 01. It starts with an empty catalog. NovaDesk is optional demo data, not the product model.
 
 No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and calls ordinary MCP tools. No MCP tool can approve a mandate or complete payment.
 
@@ -12,15 +12,15 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 - Passkey registration/login, opaque hashed sessions, HttpOnly cookies, CSRF protection, idle and absolute expiry.
 - Merchants, role memberships, one-time invitations, product CRUD, optimistic concurrency, archival, and immutable revisions.
 - Shopify Admin GraphQL catalog connection with encrypted store tokens, `read_products` scope verification, INR validation, variant synchronization, immutable revisions, and authoritative-source evidence.
-- Merchant API keys with `ar_test_` prefix, scopes, hashes, expiry, last-use tracking, rotation-ready creation, and revocation.
+- Merchant API keys with `ss_test_` prefix, scopes, hashes, expiry, last-use tracking, rotation-ready creation, and revocation. Existing legacy keys remain accepted until rotated.
 - Per-merchant mock or Razorpay Test Mode configuration. Secrets use AES-256-GCM and are never returned after setup.
-- Buyer-bound IntentLocks with passkey approval, deterministic policy checks, one unique payment claim, replay prevention, and reconciliation-required failure handling.
+- Buyer-bound PurchasePermits with passkey approval, deterministic policy checks, one unique payment claim, replay prevention, and reconciliation-required failure handling.
 - Merchant-specific raw-body Razorpay webhooks, HMAC verification, and per-merchant event deduplication.
 - OAuth 2.1 authorization code + S256 PKCE for ChatGPT MCP, 15-minute access tokens, rotating 30-day refresh tokens, and reuse-family revocation.
-- Separate SHA-256 hash-linked chains for each IntentLock and merchant administration stream. PostgreSQL triggers reject updates/deletes.
+- Separate SHA-256 hash-linked chains for each PurchasePermit and merchant administration stream. PostgreSQL triggers reject updates/deletes.
 - JSON request logging, secret-safe audit payloads, rate limits, Zod validation, size limits, CORS, security headers, health/readiness, and graceful shutdown.
 
-Security language is deliberately narrow: merchant-managed data is authoritative inside AgentRail’s trust domain; refund terms are checked but not guaranteed; passkeys prove authenticator control, not legal identity; the audit chain is tamper-evident, not blockchain or externally anchored.
+Security language is deliberately narrow: merchant-managed data is authoritative inside SpendSeal’s trust domain; refund terms are checked but not guaranteed; passkeys prove authenticator control, not legal identity; the audit chain is tamper-evident, not blockchain or externally anchored.
 
 ## Current verification status
 
@@ -28,13 +28,13 @@ The checked-in build has been verified with:
 
 - TypeScript project-reference type checking.
 - Production builds for the shared core, Express server, and React frontend.
-- Thirteen automated policy, cryptography, OAuth, PostgreSQL, concurrency, tenant-isolation, and audit-integrity tests.
+- Eighteen automated policy, cryptography, OAuth, PostgreSQL, concurrency, tenant-isolation, Shopify, and audit-integrity tests.
 - A production dependency audit with zero known runtime vulnerabilities.
-- An OrbStack Compose build and health check with both PostgreSQL and AgentRail reporting healthy.
+- An OrbStack Compose build and health check with both PostgreSQL and SpendSeal reporting healthy.
 - An unauthenticated MCP probe returning `401 Unauthorized` with the OAuth protected-resource challenge.
 - A browser smoke test of the production login page with no console errors.
 
-The Playwright specification covers the complete account → merchant → product → IntentLock → passkey → mock payment → audit flow. On macOS it requires a locally runnable Playwright Chromium installation with WebAuthn virtual-authenticator support.
+The Playwright specification covers the complete account → merchant → product → PurchasePermit → passkey → mock payment → audit flow. On macOS it requires a locally runnable Playwright Chromium installation with WebAuthn virtual-authenticator support.
 
 ## Run with OrbStack (recommended)
 
@@ -49,7 +49,7 @@ Requirements: OrbStack with Docker Compose support.
 
 2. Put the generated value in `CREDENTIAL_ENCRYPTION_KEY` in `.env`.
 
-3. Start PostgreSQL and AgentRail:
+3. Start PostgreSQL and SpendSeal:
 
    ```bash
    docker compose up --build -d
@@ -71,31 +71,31 @@ The app process applies verified SQL migrations before listening. `/api/v1/healt
 
 ### First-run product flow
 
-1. Register an AgentRail account with a device passkey.
+1. Register a SpendSeal account with a device passkey.
 2. Create your merchant trust domain.
 3. Connect a Shopify development store and synchronize its real catalog, or publish a product manually.
 4. Connect the deterministic mock adapter for a zero-cost demo, or connect that merchant’s Razorpay Test account.
 5. Select the product in the buyer view and set the maximum spend, refund requirement, price-change policy, and expiry.
-6. Create the IntentLock and open its one-time approval URL.
+6. Create the PurchasePermit and open its one-time approval URL.
 7. Approve with the same buyer account’s passkey.
 8. Run the deterministic policy check and complete the Test Mode checkout.
-9. Open the IntentLock audit explorer and verify its SHA-256 hash-linked chain.
+9. Open the PurchasePermit audit explorer and verify its SHA-256 hash-linked chain.
 
 The merchant controls authoritative product facts. The buyer controls authorization constraints. Neither ChatGPT nor an approval URL can approve the payment.
 
 ## Connect a Shopify development store
 
-AgentRail uses Shopify Admin GraphQL as the authoritative source for synchronized prices and availability. Shopify access tokens are encrypted with the same versioned AES-256-GCM credential vault as payment secrets and are never returned after setup.
+SpendSeal uses Shopify Admin GraphQL as the authoritative source for synchronized prices and availability. Shopify access tokens are encrypted with the same versioned AES-256-GCM credential vault as payment secrets and are never returned after setup.
 
 1. In Shopify Admin, open **Settings → Apps and sales channels → Develop apps**.
-2. Create a custom app named `AgentRail Catalog Reader`.
+2. Create a custom app named `SpendSeal Catalog Reader`.
 3. Configure Admin API scopes and grant only `read_products`.
 4. Install the app and copy its Admin API access token. Shopify displays this token only once.
-5. In AgentRail, create or select your merchant. In **Connect your Shopify development store**, enter the permanent domain such as `agentrail-test-store.myshopify.com` and the token. Do not paste the token into ChatGPT.
+5. In SpendSeal, create or select your merchant. In **Connect your Shopify development store**, enter the permanent domain such as `agentrail-test-store.myshopify.com` and the token. Do not paste the token into ChatGPT.
 6. Choose the merchant-stated refund default. Shopify supplies product facts but does not guarantee refund fulfilment.
-7. Click **Encrypt token, verify store, and sync**. Each Shopify variant becomes a separately purchasable AgentRail product with an immutable revision.
+7. Click **Encrypt token, verify store, and sync**. Each Shopify variant becomes a separately purchasable SpendSeal product with an immutable revision.
 
-For the bait-and-switch demonstration, create an IntentLock, change the selected variant price in Shopify, then click **Sync Shopify now**. AgentRail records the new authoritative revision and deterministically rejects execution when the changed terms violate the mandate.
+For the bait-and-switch demonstration, create a PurchasePermit, change the selected variant price in Shopify, then click **Sync Shopify now**. SpendSeal records the new authoritative revision and deterministically rejects execution when the changed terms violate the mandate.
 
 This local Buildathon connector intentionally uses an admin-created custom app to avoid requiring a deployed OAuth callback during development. A public multi-store SaaS version should use Shopify app OAuth instead.
 
@@ -107,7 +107,7 @@ Start PostgreSQL first (Compose can provide only the database):
 docker compose up -d postgres
 cp .env.example .env
 # Add a real output from: openssl rand -base64 32
-npm install --cache /tmp/agentrail-npm-cache
+npm install --cache /tmp/spendseal-npm-cache
 npm run dev
 ```
 
@@ -133,7 +133,7 @@ The old SQLite files under `data/` are legacy demo artifacts. The PostgreSQL reb
 
 ## Optional NovaDesk rehearsal data
 
-AgentRail is empty by default. To create the labeled NovaDesk demo only when wanted:
+SpendSeal is empty by default. To create the labeled NovaDesk demo only when wanted:
 
 1. Set `DEMO_MODE=true`.
 2. Register the owner in the browser.
@@ -145,11 +145,11 @@ The command creates NovaDesk, three sample plans, and a merchant-isolated mock p
 ## Razorpay Test Mode per merchant
 
 1. In Razorpay Dashboard, switch to Test Mode and generate a key beginning with `rzp_test_`.
-2. If `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` are already in the local `.env`, click **Use Test keys already in .env**. Otherwise, enter them in the selected merchant’s AgentRail payment panel.
+2. If `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` are already in the local `.env`, click **Use Test keys already in .env**. Otherwise, enter them in the selected merchant’s SpendSeal payment panel.
 3. Copy the generated webhook secret immediately; it is shown once.
 4. In Razorpay, configure the displayed merchant-specific URL:
 
-   `https://your-agentrail-host/api/webhooks/razorpay/{merchantId}`
+   `https://your-spendseal-host/api/webhooks/razorpay/{merchantId}`
 
 5. Subscribe to `payment.captured` and relevant failure events.
 
@@ -166,7 +166,7 @@ WEBAUTHN_ORIGIN=https://your-host.example
 WEBAUTHN_RP_ID=your-host.example
 ```
 
-Restart and enroll the passkey again whenever the RP ID changes. Expose port 43117 with a free HTTPS tunnel, add `https://your-host.example/mcp` as the ChatGPT Developer Mode connection, and complete AgentRail’s OAuth consent flow while signed in as the buyer.
+Restart and enroll the passkey again whenever the RP ID changes. Expose port 43117 with a free HTTPS tunnel, add `https://your-host.example/mcp` as the ChatGPT Developer Mode connection, and complete SpendSeal’s OAuth consent flow while signed in as the buyer.
 
 Implemented MCP tools:
 
@@ -174,10 +174,10 @@ Implemented MCP tools:
 |---|---|---|
 | `list_merchants` | `catalog:read` | Discovers active merchants |
 | `list_products` | `catalog:read` | Reads one merchant’s active authoritative catalog |
-| `create_intent_lock` | `intents:create` | Creates a mandate for the OAuth buyer; buyer ID is never accepted as input |
-| `get_intent_lock` | `intents:read` | Returns only the OAuth buyer’s mandate |
+| `create_purchase_permit` | `intents:create` | Creates a mandate for the OAuth buyer; buyer ID is never accepted as input |
+| `get_purchase_permit` | `intents:read` | Returns only the OAuth buyer’s mandate |
 | `prepare_checkout` | `checkout:prepare` | Runs policy and claims at most one Test Mode order |
-| `get_audit_trail` | `audit:read` | Returns only the OAuth buyer’s intent evidence |
+| `get_audit_trail` | `audit:read` | Returns only the OAuth buyer’s PurchasePermit evidence |
 
 OAuth metadata is published at `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, and `/.well-known/openid-configuration`. Authorization codes are single-use and expire after five minutes. Access tokens are opaque and live for fifteen minutes. Refresh tokens rotate and reuse revokes the whole family.
 
@@ -203,11 +203,11 @@ To rotate credential encryption safely, generate a new 32-byte base64 key, incre
 
 ```mermaid
 flowchart LR
-  GPT[ChatGPT] -->|OAuth buyer + MCP| MCP[AgentRail MCP]
-  Browser[Buyer browser] -->|Passkey + CSRF session| API[AgentRail REST API]
+  GPT[ChatGPT] -->|OAuth buyer + MCP| MCP[SpendSeal MCP]
+  Browser[Buyer browser] -->|Passkey + CSRF session| API[SpendSeal REST API]
   Merchant[Merchant member] -->|Catalog + Test credentials| API
   Shopify[Shopify Admin GraphQL] -->|read-only catalog sync| API
-  MCP --> Lock[Buyer-bound IntentLock]
+  MCP --> Lock[Buyer-bound PurchasePermit]
   API --> Lock
   Lock --> Policy[Deterministic policy engine]
   Catalog[(Merchant product revisions)] --> Policy

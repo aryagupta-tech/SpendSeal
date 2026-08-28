@@ -18,7 +18,7 @@ export type Merchant = z.infer<typeof MerchantSchema>;
 export const CatalogAuthoritySchema = z.object({
   type: z.literal("merchant_managed_catalog"),
   merchantId: z.string().uuid(),
-  source: z.enum(["agentrail_server", "shopify_admin_graphql"]),
+  source: z.enum(["spendseal_server", "shopify_admin_graphql"]),
   shopDomain: z.string().nullable().optional(),
 });
 export type CatalogAuthority = z.infer<typeof CatalogAuthoritySchema>;
@@ -38,14 +38,14 @@ export const CreateIntentInputSchema = z.object({
 });
 export type CreateIntentInput = z.infer<typeof CreateIntentInputSchema>;
 
-export const IntentLockSchema = z.object({
+export const PurchasePermitSchema = z.object({
   id: z.string().uuid(), buyerId: z.string().uuid(), merchantId: z.string().uuid(), productId: z.string().uuid(), productRevisionId: z.string().uuid(),
   quantity: z.literal(1), currency: z.literal("INR"), productSnapshotHash: z.string(), lockedUnitPricePaise: z.number().int().positive(),
   maxTotalPaise: z.number().int().positive(), priceChangePolicy: PriceChangePolicySchema, requireRefundable: z.boolean(),
   minimumRefundWindowDays: z.number().int().nonnegative().nullable(), expiresAt: z.string().datetime(), confirmationRequired: z.literal(true),
   confirmedAt: z.string().datetime().nullable(), idempotencyKey: z.string(), status: z.enum(INTENT_STATUSES), createdAt: z.string().datetime(),
 });
-export type IntentLock = z.infer<typeof IntentLockSchema>;
+export type PurchasePermit = z.infer<typeof PurchasePermitSchema>;
 
 export const REASON_CODES = [
   "ALLOWED", "MERCHANT_MISMATCH", "PRODUCT_MISMATCH", "PRODUCT_INACTIVE", "CURRENCY_MISMATCH", "PRICE_CHANGED", "BUDGET_EXCEEDED",
@@ -67,13 +67,13 @@ export type AuditActor = z.infer<typeof AuditActorSchema>;
 
 export const AuditEventSchema = z.object({
   id: z.string().uuid(), sequence: z.number().int().positive(), scopeType: z.enum(["intent", "merchant"]), scopeId: z.string().uuid(),
-  merchantId: z.string().uuid(), intentLockId: z.string().uuid().nullable(), eventType: z.string(), actor: AuditActorSchema,
+  merchantId: z.string().uuid(), purchasePermitId: z.string().uuid().nullable(), eventType: z.string(), actor: AuditActorSchema,
   reasonCode: ReasonCodeSchema.nullable(), payload: z.unknown(), previousHash: z.string(), hash: z.string(), createdAt: z.string().datetime(),
 });
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 
 export const PaymentOrderSchema = z.object({
-  id: z.string().uuid(), intentLockId: z.string().uuid(), merchantId: z.string().uuid(), buyerId: z.string().uuid(), providerOrderId: z.string(),
+  id: z.string().uuid(), purchasePermitId: z.string().uuid(), merchantId: z.string().uuid(), buyerId: z.string().uuid(), providerOrderId: z.string(),
   amountPaise: z.number().int().positive(), currency: z.literal("INR"), checkoutToken: z.string(), status: z.enum(["creating", "ready", "paid", "reconciliation_required"]),
   paymentId: z.string().nullable(), createdAt: z.string().datetime(), observedProductVersion: z.number().int().positive(), observedProductRevisionId: z.string().uuid(),
   observedProductSnapshotHash: z.string(), catalogAuthority: CatalogAuthoritySchema, observedAt: z.string().datetime(), paymentConfigVersion: z.number().int().nonnegative(),

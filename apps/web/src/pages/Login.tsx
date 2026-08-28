@@ -42,7 +42,7 @@ export function Login() {
 
   return <div className="route-stage"><div className="route-glow" /><div className="trust-preview relative p-6 sm:p-8">
     <Badge tone="good"><ShieldCheck size={12} /> Passwordless account security</Badge>
-    <h1 className="mt-5 text-3xl font-semibold tracking-tight">{mode === "register" ? "Create your AgentRail account" : "Sign in with your passkey"}</h1>
+    <h1 className="mt-5 text-3xl font-semibold tracking-tight">{mode === "register" ? "Create your SpendSeal account" : "Sign in with your passkey"}</h1>
     <p className="mt-3 text-sm leading-6 text-white/45">One account can buy products and manage any merchants it belongs to. The passkey proves control of your authenticator—not KYC or legal identity.</p>
     {error && <div className="mt-5"><ErrorNotice message={error} /></div>}
     <div className="mt-6 space-y-4">

@@ -32,7 +32,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     oauthIssuer: process.env.OAUTH_ISSUER ?? publicBaseUrl,
     webauthnRpId: process.env.WEBAUTHN_RP_ID ?? new URL(webauthnOrigin).hostname,
     webauthnOrigin,
-    webauthnRpName: process.env.WEBAUTHN_RP_NAME ?? "AgentRail",
+    webauthnRpName: process.env.WEBAUTHN_RP_NAME ?? "SpendSeal",
     demoMode: process.env.DEMO_MODE === "true",
     sessionIdleMinutes: Number(process.env.SESSION_IDLE_MINUTES ?? 30),
     sessionAbsoluteHours: Number(process.env.SESSION_ABSOLUTE_HOURS ?? 8),

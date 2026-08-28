@@ -10,8 +10,8 @@ describe("Shopify catalog connector", () => {
   });
 
   it("requires read_products and INR", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: { shop: { name: "AgentRail Test Store", currencyCode: "INR" }, currentAppInstallation: { accessScopes: [{ handle: "read_products" }] } } }), { status: 200, headers: { "content-type": "application/json" } })));
-    await expect(new ShopifyAdminClient("agentrail-test-store.myshopify.com", "shpat_test_token_123456").verify()).resolves.toMatchObject({ shopName: "AgentRail Test Store", currency: "INR" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: { shop: { name: "SpendSeal Test Store", currencyCode: "INR" }, currentAppInstallation: { accessScopes: [{ handle: "read_products" }] } } }), { status: 200, headers: { "content-type": "application/json" } })));
+    await expect(new ShopifyAdminClient("agentrail-test-store.myshopify.com", "shpat_test_token_123456").verify()).resolves.toMatchObject({ shopName: "SpendSeal Test Store", currency: "INR" });
   });
 
   it("maps Shopify variants to exact paise without floating-point rounding", async () => {

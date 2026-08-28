@@ -1,5 +1,5 @@
 {
-  "name": "@agentrail/server",
+  "name": "@spendseal/server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentrail/core": "*",
+    "@spendseal/core": "*",
     "@modelcontextprotocol/sdk": "^1.17.4",
     "@simplewebauthn/server": "^13.3.2",
     "cors": "^2.8.5",

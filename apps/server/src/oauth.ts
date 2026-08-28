@@ -1,15 +1,15 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
-import { MCP_SCOPES, sha256 } from "@agentrail/core";
+import { MCP_SCOPES, sha256 } from "@spendseal/core";
 import type { Config } from "./config.js";
 import { transaction } from "./db/client.js";
-import { AgentRailError } from "./service.js";
-import { AgentRailStore } from "./store.js";
+import { SpendSealError } from "./service.js";
+import { SpendSealStore } from "./store.js";
 
 export type OAuthPrincipal = { userId: string; clientId: string; scopes: string[]; resource: string };
 
 export class OAuthService {
-  constructor(readonly store: AgentRailStore, readonly config: Config) {}
+  constructor(readonly store: SpendSealStore, readonly config: Config) {}
 
   protectedResourceMetadata() {
     return { resource: this.config.publicBaseUrl, authorization_servers: [this.config.oauthIssuer], scopes_supported: [...MCP_SCOPES], resource_documentation: `${this.config.publicBaseUrl}/docs/oauth` };
@@ -32,13 +32,13 @@ export class OAuthService {
   }
 
   validateAuthorizationRequest(input: Record<string, string | undefined>) {
-    if (input.response_type !== "code") throw new AgentRailError(400, "unsupported_response_type", "Only authorization code flow is supported.");
-    if (!input.client_id || !this.allowedClientId(input.client_id)) throw new AgentRailError(400, "invalid_client", "The OAuth client is not allowed.");
-    if (!input.redirect_uri || !this.allowedRedirect(input.redirect_uri)) throw new AgentRailError(400, "invalid_redirect_uri", "The redirect URI is not allowed.");
-    if (!input.resource || input.resource !== this.config.publicBaseUrl) throw new AgentRailError(400, "invalid_target", "The OAuth resource must exactly match AgentRail.");
-    if (!input.code_challenge || input.code_challenge_method !== "S256") throw new AgentRailError(400, "invalid_request", "S256 PKCE is required.");
+    if (input.response_type !== "code") throw new SpendSealError(400, "unsupported_response_type", "Only authorization code flow is supported.");
+    if (!input.client_id || !this.allowedClientId(input.client_id)) throw new SpendSealError(400, "invalid_client", "The OAuth client is not allowed.");
+    if (!input.redirect_uri || !this.allowedRedirect(input.redirect_uri)) throw new SpendSealError(400, "invalid_redirect_uri", "The redirect URI is not allowed.");
+    if (!input.resource || input.resource !== this.config.publicBaseUrl) throw new SpendSealError(400, "invalid_target", "The OAuth resource must exactly match SpendSeal.");
+    if (!input.code_challenge || input.code_challenge_method !== "S256") throw new SpendSealError(400, "invalid_request", "S256 PKCE is required.");
     const scopes = [...new Set((input.scope ?? "").split(/\s+/).filter(Boolean))];
-    if (!scopes.length || scopes.some((scope) => !(MCP_SCOPES as readonly string[]).includes(scope))) throw new AgentRailError(400, "invalid_scope", "One or more requested scopes are unsupported.");
+    if (!scopes.length || scopes.some((scope) => !(MCP_SCOPES as readonly string[]).includes(scope))) throw new SpendSealError(400, "invalid_scope", "One or more requested scopes are unsupported.");
     return { clientId: input.client_id, redirectUri: input.redirect_uri, resource: input.resource, codeChallenge: input.code_challenge, scopes, state: input.state ?? "" };
   }
 
@@ -53,9 +53,9 @@ export class OAuthService {
   async exchangeCode(input: { code: string; codeVerifier: string; clientId: string; redirectUri: string; resource: string }) {
     return transaction(this.store.pool, async (client) => {
       const result = await client.query("SELECT * FROM oauth_authorization_codes WHERE code_hash=$1 FOR UPDATE", [sha256(input.code)]); const row = result.rows[0];
-      if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) throw new AgentRailError(400, "invalid_grant", "Authorization code is invalid, expired, or already used.");
-      if (row.client_id !== input.clientId || row.redirect_uri !== input.redirectUri || row.resource !== input.resource) throw new AgentRailError(400, "invalid_grant", "Authorization code context does not match.");
-      if (!secureEqual(row.code_challenge, pkceChallenge(input.codeVerifier))) throw new AgentRailError(400, "invalid_grant", "PKCE verification failed.");
+      if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) throw new SpendSealError(400, "invalid_grant", "Authorization code is invalid, expired, or already used.");
+      if (row.client_id !== input.clientId || row.redirect_uri !== input.redirectUri || row.resource !== input.resource) throw new SpendSealError(400, "invalid_grant", "Authorization code context does not match.");
+      if (!secureEqual(row.code_challenge, pkceChallenge(input.codeVerifier))) throw new SpendSealError(400, "invalid_grant", "PKCE verification failed.");
       await client.query("UPDATE oauth_authorization_codes SET consumed_at=now() WHERE code_hash=$1", [sha256(input.code)]);
       return this.issueTokens(client, { userId: row.user_id, clientId: row.client_id, resource: row.resource, scopes: row.scopes_json, familyId: randomUUID() });
     });
@@ -64,14 +64,14 @@ export class OAuthService {
   async refresh(input: { refreshToken: string; clientId: string; resource: string }) {
     const outcome = await transaction(this.store.pool, async (client) => {
       const result = await client.query("SELECT * FROM oauth_tokens WHERE token_hash=$1 AND token_type='refresh' FOR UPDATE", [sha256(input.refreshToken)]); const row = result.rows[0];
-      if (!row || row.client_id !== input.clientId || row.resource !== input.resource || row.revoked_at || new Date(row.expires_at).getTime() <= Date.now()) throw new AgentRailError(400, "invalid_grant", "Refresh token is invalid or expired.");
+      if (!row || row.client_id !== input.clientId || row.resource !== input.resource || row.revoked_at || new Date(row.expires_at).getTime() <= Date.now()) throw new SpendSealError(400, "invalid_grant", "Refresh token is invalid or expired.");
       if (row.consumed_at) { await client.query("UPDATE oauth_tokens SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL", [row.family_id]); return { reused: true as const }; }
       await client.query("UPDATE oauth_tokens SET consumed_at=now() WHERE id=$1", [row.id]);
       const issued = await this.issueTokens(client, { userId: row.user_id, clientId: row.client_id, resource: row.resource, scopes: row.scopes_json, familyId: row.family_id });
       await client.query("UPDATE oauth_tokens SET replaced_by_id=$2 WHERE id=$1", [row.id, issued.refreshId]);
       return { reused: false as const, issued };
     });
-    if (outcome.reused) throw new AgentRailError(400, "invalid_grant", "Refresh token reuse detected; the token family was revoked.");
+    if (outcome.reused) throw new SpendSealError(400, "invalid_grant", "Refresh token reuse detected; the token family was revoked.");
     return outcome.issued;
   }
 

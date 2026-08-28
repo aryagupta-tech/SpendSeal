@@ -1,14 +1,14 @@
-import type { IntentLock, PolicyDecision, Product, ReasonCode } from "./schemas.js";
+import type { PurchasePermit, PolicyDecision, Product, ReasonCode } from "./schemas.js";
 
-const replayStatuses = new Set<IntentLock["status"]>([
+const replayStatuses = new Set<PurchasePermit["status"]>([
   "executing",
   "checkout_ready",
   "paid",
   "reconciliation_required",
 ]);
 
-export function evaluateIntentLock(
-  intent: IntentLock,
+export function evaluatePurchasePermit(
+  intent: PurchasePermit,
   product: Product | null,
   now = new Date(),
 ): PolicyDecision {
@@ -52,7 +52,7 @@ export function evaluateIntentLock(
     reasons: uniqueReasons.length === 0 ? ["ALLOWED"] : uniqueReasons,
     message:
       uniqueReasons.length === 0
-        ? "Every IntentLock constraint passed. Checkout may be prepared."
+        ? "Every PurchasePermit constraint passed. Checkout may be prepared."
         : `Checkout blocked: ${uniqueReasons.join(", ")}.`,
     evaluatedAt: observedAt,
     observedAt,

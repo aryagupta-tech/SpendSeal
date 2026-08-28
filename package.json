@@ -1,5 +1,5 @@
 {
-  "name": "agentrail",
+  "name": "spendseal",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,18 +8,18 @@
     "packages/*"
   ],
   "scripts": {
-    "predev": "npm run build -w @agentrail/core && npm run build -w @agentrail/server",
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @agentrail/server\" \"npm run dev -w @agentrail/web\"",
-    "build": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run build -w @agentrail/web",
-    "db:migrate": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run migrate -w @agentrail/server",
-    "demo:seed": "npm run build -w @agentrail/core && npm run build -w @agentrail/server && npm run seed -w @agentrail/server",
+    "predev": "npm run build -w @spendseal/core && npm run build -w @spendseal/server",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @spendseal/server\" \"npm run dev -w @spendseal/web\"",
+    "build": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run build -w @spendseal/web",
+    "db:migrate": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run migrate -w @spendseal/server",
+    "demo:seed": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run seed -w @spendseal/server",
     "typecheck": "tsc -b",
-    "pretest": "npm run build -w @agentrail/core",
+    "pretest": "npm run build -w @spendseal/core",
     "test": "vitest run",
     "test:watch": "vitest",
     "pretest:e2e": "npm run build",
     "test:e2e": "playwright test",
-    "start": "npm run start -w @agentrail/server"
+    "start": "npm run start -w @spendseal/server"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

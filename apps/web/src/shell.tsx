@@ -15,7 +15,7 @@ export function AppShell() {
         <div className="glass-nav mx-auto flex max-w-[1460px] items-center justify-between gap-3 px-3 py-2.5 sm:px-4">
           <Link to="/" className="flex min-w-0 items-center gap-3 rounded-xl">
             <span className="rail-logo"><ShieldCheck size={20} /></span>
-            <span className="text-base font-bold tracking-[-.025em] sm:text-lg">AgentRail</span>
+            <span className="text-base font-bold tracking-[-.025em] sm:text-lg">SpendSeal</span>
             <span className="hidden items-center gap-1.5 rounded-full border border-mint/15 bg-mint/[.07] px-2.5 py-1 font-mono text-[9px] uppercase tracking-[.16em] text-mint sm:inline-flex"><span className="status-pulse" /> Multi-merchant Test Mode</span>
           </Link>
           <div className="flex items-center gap-2 text-xs text-white/50 sm:gap-4">
@@ -27,7 +27,7 @@ export function AppShell() {
       </header>
       <main className="relative z-10"><Outlet /></main>
       <footer className="relative z-10 mx-auto mb-4 mt-16 flex max-w-[1460px] flex-col gap-3 border-t border-white/[.08] px-5 py-7 text-xs text-white/35 sm:flex-row sm:items-center sm:justify-between lg:px-8">
-        <span>ChatGPT interprets. A passkey approves. AgentRail enforces. Razorpay moves the money.</span>
+        <span>ChatGPT interprets. A passkey approves. SpendSeal enforces. Razorpay moves the money.</span>
         <span className="font-mono tracking-wider">DEMO ONLY · NO REAL MONEY</span>
       </footer>
     </div>

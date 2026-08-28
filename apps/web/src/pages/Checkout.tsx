@@ -39,7 +39,7 @@ export function Checkout() {
           setPaid(true);
         },
       });
-      razorpay.on("payment.failed", () => setError("Razorpay reported a simulated payment failure. The IntentLock remains unfulfilled."));
+      razorpay.on("payment.failed", () => setError("Razorpay reported a simulated payment failure. The PurchasePermit remains unfulfilled."));
       razorpay.open();
     } catch (e) { setError(e instanceof Error ? e.message : "Payment could not be completed"); }
     finally { setBusy(false); }
@@ -53,7 +53,7 @@ export function Checkout() {
       <div className="mb-7 text-center">
         <Badge tone="good"><ShieldCheck size={12} /> All constraints passed</Badge>
         <h1 className="mt-5 text-4xl font-semibold tracking-[-.045em]">Verified checkout</h1>
-        <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-white/45">Razorpay receives only the amount AgentRail observed in {data.merchant.displayName}’s merchant-managed catalog.</p>
+        <p className="mx-auto mt-3 max-w-lg text-sm leading-6 text-white/45">Razorpay receives only the amount SpendSeal observed in {data.merchant.displayName}’s merchant-managed catalog.</p>
       </div>
 
       <div className="trust-preview">
@@ -72,14 +72,14 @@ export function Checkout() {
         <div className="p-5 sm:p-6">
           <div className="mb-5 flex items-end justify-between rounded-2xl border border-mint/15 bg-mint/[.045] p-4"><div><p className="text-xs text-white/40">Authorized amount</p><p className="mt-1 text-3xl font-semibold tracking-[-.04em] text-mint">{money(data.order.amountPaise)}</p></div><Badge tone="good">INR · locked</Badge></div>
           <Constraint label="Provider order" value={<span className="font-mono text-xs">{data.order.providerOrderId}</span>} />
-          <Constraint label="IntentLock" value={<span className="font-mono text-xs">{data.intent.id.slice(0, 13)}…</span>} />
+          <Constraint label="PurchasePermit" value={<span className="font-mono text-xs">{data.intent.id.slice(0, 13)}…</span>} />
           <Constraint label="Catalog evidence" value={<span className="max-w-64 text-right text-xs">merchant_managed_catalog · revision {data.order.observedProductVersion}<br /><span className="font-mono text-[9px] text-white/35">{shortId(data.order.observedProductSnapshotHash)}</span></span>} />
           <Constraint label="Observed" value={dateTime(data.order.observedAt)} />
         </div>
 
         <div className="border-t border-white/[.08] bg-black/15 p-5 sm:p-6">
           {error && <div className="mb-4"><ErrorNotice message={error} /></div>}
-          {paid ? <div className="rounded-2xl border border-mint/25 bg-mint/[.075] p-6 text-center"><span className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-mint/20 bg-mint/10"><CheckCircle2 className="text-mint" size={27} /></span><p className="mt-4 text-lg font-semibold">Payment verified</p><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-white/45">The IntentLock is now consumed. Any replay attempt is deterministically blocked before another order can be created.</p><Link to={`/audit/${data.intent.id}`} className="button-secondary mt-5">Inspect evidence <ExternalLink size={14} /></Link></div> : <button onClick={pay} disabled={busy} className="button-primary w-full"><CreditCard size={17} /> {busy ? "Opening…" : data.adapter === "mock" ? `Simulate ${money(data.order.amountPaise)} payment` : `Pay ${money(data.order.amountPaise)} with Razorpay`}</button>}
+          {paid ? <div className="rounded-2xl border border-mint/25 bg-mint/[.075] p-6 text-center"><span className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-mint/20 bg-mint/10"><CheckCircle2 className="text-mint" size={27} /></span><p className="mt-4 text-lg font-semibold">Payment verified</p><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-white/45">The PurchasePermit is now consumed. Any replay attempt is deterministically blocked before another order can be created.</p><Link to={`/audit/${data.intent.id}`} className="button-secondary mt-5">Inspect evidence <ExternalLink size={14} /></Link></div> : <button onClick={pay} disabled={busy} className="button-primary w-full"><CreditCard size={17} /> {busy ? "Opening…" : data.adapter === "mock" ? `Simulate ${money(data.order.amountPaise)} payment` : `Pay ${money(data.order.amountPaise)} with Razorpay`}</button>}
           <p className="mt-3 text-center font-mono text-[8px] uppercase tracking-[.16em] text-white/25">{data.adapter} adapter · no real money · stated refund terms checked, not guaranteed</p>
         </div>
       </div>

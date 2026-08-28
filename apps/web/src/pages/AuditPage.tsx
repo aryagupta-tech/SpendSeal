@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Braces, CheckCircle2, Copy, Fingerprint, Link2, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import type { AuditEvent } from "@agentrail/core";
+import type { AuditEvent } from "@spendseal/core";
 import { api, dateTime, shortId } from "../api";
 import { Badge, ErrorNotice, Reveal } from "../components";
 
@@ -26,9 +26,9 @@ export function AuditPage() {
       <div className="mb-8 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="eyebrow">Security evidence console</p>
-          <h1 className="mt-3 text-4xl font-semibold tracking-[-.045em] sm:text-5xl">IntentLock decision trail</h1>
+          <h1 className="mt-3 text-4xl font-semibold tracking-[-.045em] sm:text-5xl">PurchasePermit decision trail</h1>
           <p className="mt-3 font-mono text-[10px] text-white/30">{id}</p>
-          <p className="mt-4 max-w-2xl text-sm leading-6 text-white/42">PostgreSQL triggers block normal updates and deletes; SHA-256 linked hashes reveal offline modification. Each IntentLock has its own chain. This is tamper-evident—not blockchain, externally anchored, or absolutely tamper-proof.</p>
+          <p className="mt-4 max-w-2xl text-sm leading-6 text-white/42">PostgreSQL triggers block normal updates and deletes; SHA-256 linked hashes reveal offline modification. Each PurchasePermit has its own chain. This is tamper-evident—not blockchain, externally anchored, or absolutely tamper-proof.</p>
         </div>
         <div className={`flex min-w-64 items-center gap-4 rounded-2xl border p-4 ${data.verification.valid ? "border-mint/20 bg-mint/[.065]" : "border-red-400/20 bg-red-400/[.07]"}`}>
           <span className={`grid h-11 w-11 place-items-center rounded-xl border ${data.verification.valid ? "border-mint/20 bg-mint/[.07] text-mint" : "border-red-400/20 bg-red-400/[.07] text-red-300"}`}>{data.verification.valid ? <ShieldCheck /> : <ShieldAlert />}</span>

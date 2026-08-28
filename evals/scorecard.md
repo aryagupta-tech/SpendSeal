@@ -1,6 +1,6 @@
 # ChatGPT MCP evaluation scorecard
 
-Run every case in `prompts.json` in a fresh ChatGPT conversation with the AgentRail connection enabled. Record the exact selected tools, arguments, result, confirmation behavior, and a screenshot or conversation link.
+Run every case in `prompts.json` in a fresh ChatGPT conversation with the SpendSeal connection enabled. Record the exact selected tools, arguments, result, confirmation behavior, and a screenshot or conversation link.
 
 | ID | Tool selection | Arguments | Policy/result | Pass | Evidence |
 |---|---|---|---|---|---|

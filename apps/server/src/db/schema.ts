@@ -35,7 +35,7 @@ export const passkeyCredentials = pgTable("passkey_credentials", {
 }, (table) => [index("passkeys_user_rp_idx").on(table.userId, table.rpId)]);
 
 export const webauthnChallenges = pgTable("webauthn_challenges", {
-  id: uuid("id").primaryKey(), userId: uuid("user_id").references(() => users.id), intentLockId: uuid("intent_lock_id"), purpose: text("purpose").notNull(), challenge: text("challenge").notNull(),
+  id: uuid("id").primaryKey(), userId: uuid("user_id").references(() => users.id), purchasePermitId: uuid("intent_lock_id"), purpose: text("purpose").notNull(), challenge: text("challenge").notNull(),
   context: jsonb("context_json").notNull().default({}), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
 });
 
@@ -67,18 +67,18 @@ export const paymentConfigurations = pgTable("merchant_payment_configurations", 
   keySecretCiphertext: text("key_secret_ciphertext"), webhookSecretCiphertext: text("webhook_secret_ciphertext"), encryptionKeyVersion: integer("encryption_key_version").notNull(), version: integer("version").notNull(), active: boolean("active").notNull().default(true), createdAt: createdAt(),
 }, (table) => [uniqueIndex("payment_config_merchant_version_unique").on(table.merchantId, table.version)]);
 
-export const intentLocks = pgTable("intent_locks", {
+export const purchasePermits = pgTable("intent_locks", {
   id: uuid("id").primaryKey(), buyerId: uuid("buyer_id").notNull().references(() => users.id), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").notNull().references(() => products.id), productRevisionId: uuid("product_revision_id").notNull().references(() => productRevisions.id),
   quantity: integer("quantity").notNull().default(1), currency: text("currency").notNull().default("INR"), productSnapshotHash: text("product_snapshot_hash").notNull(), lockedUnitPricePaise: integer("locked_unit_price_paise").notNull(), maxTotalPaise: integer("max_total_paise").notNull(), priceChangePolicy: text("price_change_policy").notNull(), requireRefundable: boolean("require_refundable").notNull(), minimumRefundWindowDays: integer("minimum_refund_window_days"),
   expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), idempotencyKey: text("idempotency_key").notNull().unique(), approvalTokenHash: text("approval_token_hash").notNull(), approvalTokenExchangedAt: timestamp("approval_token_exchanged_at", { withTimezone: true, mode: "string" }), status: text("status").notNull(), createdAt: createdAt(),
 }, (table) => [index("intent_buyer_idx").on(table.buyerId), index("intent_merchant_idx").on(table.merchantId)]);
 
 export const approvalSessions = pgTable("approval_sessions", {
-  tokenHash: text("token_hash").primaryKey(), intentLockId: uuid("intent_lock_id").notNull().references(() => intentLocks.id), buyerId: uuid("buyer_id").notNull().references(() => users.id), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), usedAt: timestamp("used_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
-}, (table) => [index("approval_intent_idx").on(table.intentLockId)]);
+  tokenHash: text("token_hash").primaryKey(), purchasePermitId: uuid("intent_lock_id").notNull().references(() => purchasePermits.id), buyerId: uuid("buyer_id").notNull().references(() => users.id), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), usedAt: timestamp("used_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
+}, (table) => [index("approval_intent_idx").on(table.purchasePermitId)]);
 
 export const paymentOrders = pgTable("payment_orders", {
-  id: uuid("id").primaryKey(), intentLockId: uuid("intent_lock_id").notNull().references(() => intentLocks.id).unique(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), buyerId: uuid("buyer_id").notNull().references(() => users.id),
+  id: uuid("id").primaryKey(), purchasePermitId: uuid("intent_lock_id").notNull().references(() => purchasePermits.id).unique(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), buyerId: uuid("buyer_id").notNull().references(() => users.id),
   providerOrderId: text("provider_order_id").unique(), amountPaise: integer("amount_paise").notNull(), currency: text("currency").notNull().default("INR"), checkoutTokenHash: text("checkout_token_hash").notNull().unique(), checkoutToken: text("checkout_token").notNull(), status: text("status").notNull(), paymentId: text("payment_id").unique(),
   observedProductVersion: integer("observed_product_version").notNull(), observedProductRevisionId: uuid("observed_product_revision_id").notNull().references(() => productRevisions.id), observedSnapshotHash: text("observed_snapshot_hash").notNull(), observedCatalogSource: text("observed_catalog_source").notNull().default("agentrail_server"), observedShopDomain: text("observed_shop_domain"), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), paymentConfigVersion: integer("payment_config_version").notNull(), createdAt: createdAt(),
 }, (table) => [index("orders_merchant_idx").on(table.merchantId), index("orders_buyer_idx").on(table.buyerId)]);
@@ -92,7 +92,7 @@ export const auditChainHeads = pgTable("audit_chain_heads", {
 }, (table) => [primaryKey({ columns: [table.scopeType, table.scopeId] })]);
 
 export const auditEvents = pgTable("audit_events", {
-  id: uuid("id").primaryKey(), sequence: integer("sequence").notNull(), scopeType: text("scope_type").notNull(), scopeId: uuid("scope_id").notNull(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), intentLockId: uuid("intent_lock_id").references(() => intentLocks.id),
+  id: uuid("id").primaryKey(), sequence: integer("sequence").notNull(), scopeType: text("scope_type").notNull(), scopeId: uuid("scope_id").notNull(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), purchasePermitId: uuid("intent_lock_id").references(() => purchasePermits.id),
   eventType: text("event_type").notNull(), actor: text("actor").notNull(), reasonCode: text("reason_code"), payload: jsonb("payload_json").notNull(), previousHash: text("previous_hash").notNull(), hash: text("hash").notNull(), createdAt: createdAt(),
 }, (table) => [uniqueIndex("audit_scope_sequence_unique").on(table.scopeType, table.scopeId, table.sequence), uniqueIndex("audit_scope_hash_unique").on(table.scopeType, table.scopeId, table.hash), index("audit_merchant_idx").on(table.merchantId)]);
 

@@ -4,18 +4,18 @@ import { Pool } from "pg";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
 import { OAuthService } from "../src/oauth.js";
-import { AgentRailService } from "../src/service.js";
-import { AgentRailStore } from "../src/store.js";
+import { SpendSealService } from "../src/service.js";
+import { SpendSealStore } from "../src/store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "postgresql://agentrail:agentrail-local-only@127.0.0.1:5432/agentrail_test";
-let pool: Pool; let store: AgentRailStore; let service: AgentRailService;
+let pool: Pool; let store: SpendSealStore; let service: SpendSealService;
 
 beforeAll(async () => {
   const target = new URL(databaseUrl); const databaseName = target.pathname.slice(1); const admin = new Pool({ connectionString: new URL("/postgres", target).toString() });
   try { await admin.query(`CREATE DATABASE "${databaseName.replaceAll('"', '""')}"`); } catch (error) { if ((error as { code?: string }).code !== "42P04") throw error; } finally { await admin.end(); }
-  pool = createDatabase(databaseUrl).pool; await runMigrations(pool); store = new AgentRailStore(pool);
+  pool = createDatabase(databaseUrl).pool; await runMigrations(pool); store = new SpendSealStore(pool);
   const config = loadConfig({ databaseUrl, publicBaseUrl: "http://agentrail.test", oauthIssuer: "http://agentrail.test", webauthnOrigin: "http://agentrail.test", webauthnRpId: "agentrail.test", credentialEncryptionKey: Buffer.alloc(32, 7) });
-  service = new AgentRailService(store, config);
+  service = new SpendSealService(store, config);
 }, 30_000);
 
 beforeEach(async () => {
@@ -25,10 +25,10 @@ afterAll(async () => { await pool?.end(); });
 
 async function user(username: string) { return store.createUserWithPasskey({ username, displayName: username, rpId: "agentrail.test", credentialId: `cred_${username}`, publicKey: new Uint8Array([1, 2, 3]), counter: 0, deviceType: "singleDevice", backedUp: false, transports: ["internal"] }); }
 async function merchantProduct(ownerName = "owner") { const owner = await user(ownerName); const merchant = await store.createMerchant(owner.id, { slug: `shop-${ownerName}`, displayName: `${ownerName} Shop` }); await service.configurePayments(merchant.id, { adapter: "mock" }); const product = await store.createProduct(owner.id, merchant.id, { sku: "PLAN-1", name: "Annual Plan", description: "A real merchant product", pricePaise: 99_900, refundable: true, refundWindowDays: 7 }); return { owner, merchant, product }; }
-async function approvedIntent(buyerName = "buyer") { const buyer = await user(buyerName); const setup = await merchantProduct(`owner-${buyerName}`); const created = await service.createIntent(buyer.id, { merchantId: setup.merchant.id, productId: setup.product.id, maxTotalPaise: 110_000, priceChangePolicy: "none", requireRefundable: true, minimumRefundWindowDays: 7, expiresInMinutes: 10 }, "buyer"); const token = new URL(created.approvalUrl).searchParams.get("token")!; const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, token); expect(approval).not.toBeNull(); const confirmed = await store.completeApproval({ intentLockId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: `cred_${buyerName}`, counter: 1, deviceType: "singleDevice", backedUp: false }); expect(confirmed?.status).toBe("confirmed"); return { buyer, ...setup, intent: confirmed! }; }
+async function approvedIntent(buyerName = "buyer") { const buyer = await user(buyerName); const setup = await merchantProduct(`owner-${buyerName}`); const created = await service.createIntent(buyer.id, { merchantId: setup.merchant.id, productId: setup.product.id, maxTotalPaise: 110_000, priceChangePolicy: "none", requireRefundable: true, minimumRefundWindowDays: 7, expiresInMinutes: 10 }, "buyer"); const token = new URL(created.approvalUrl).searchParams.get("token")!; const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, token); expect(approval).not.toBeNull(); const confirmed = await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: `cred_${buyerName}`, counter: 1, deviceType: "singleDevice", backedUp: false }); expect(confirmed?.status).toBe("confirmed"); return { buyer, ...setup, intent: confirmed! }; }
 
 describe("PostgreSQL tenant and payment invariants", () => {
-  it("keeps products and IntentLocks isolated across merchants and buyers", async () => {
+  it("keeps products and PurchasePermits isolated across merchants and buyers", async () => {
     const first = await approvedIntent("buyer-a"); const outsider = await user("outsider"); const second = await merchantProduct("owner-b");
     expect(await store.getProduct(second.merchant.id, first.product.id)).toBeNull();
     expect(await store.getIntent(first.intent.id, outsider.id)).toBeNull();
@@ -45,7 +45,7 @@ describe("PostgreSQL tenant and payment invariants", () => {
 
   it("synchronizes Shopify variants as immutable authoritative revisions", async () => {
     const owner = await user("shopify-owner"); const merchant = await store.createMerchant(owner.id, { slug: "shopify-store", displayName: "Shopify Store" });
-    const connection = await store.saveShopifyConnection({ merchantId: merchant.id, provider: "shopify", shopDomain: "agentrail-test-store.myshopify.com", accessTokenCiphertext: "encrypted-test-token", encryptionKeyVersion: 1, shopName: "AgentRail Test Store", currency: "INR", defaultRefundable: true, defaultRefundWindowDays: 7 });
+    const connection = await store.saveShopifyConnection({ merchantId: merchant.id, provider: "shopify", shopDomain: "agentrail-test-store.myshopify.com", accessTokenCiphertext: "encrypted-test-token", encryptionKeyVersion: 1, shopName: "SpendSeal Test Store", currency: "INR", defaultRefundable: true, defaultRefundWindowDays: 7 });
     const base = { externalId: "gid://shopify/ProductVariant/42", sku: "SHOPIFY-42", name: "Annual Plan", description: "Real Shopify variant", active: true, externalUpdatedAt: "2026-08-28T05:00:00.000Z" };
     expect((await store.syncShopifyProducts(owner.id, connection, [{ ...base, pricePaise: 99_900 }])).created).toBe(1);
     const first = (await store.listProducts(merchant.id)).products[0]!; expect(first.catalogAuthority).toMatchObject({ source: "shopify_admin_graphql", shopDomain: "agentrail-test-store.myshopify.com" }); expect(first.version).toBe(1);

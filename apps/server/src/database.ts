@@ -9,11 +9,11 @@ import {
   sha256,
   type AuditActor,
   type AuditEvent,
-  type IntentLock,
+  type PurchasePermit,
   type PaymentOrder,
   type Product,
   type ReasonCode,
-} from "@agentrail/core";
+} from "@spendseal/core";
 
 type Row = Record<string, unknown>;
 
@@ -30,7 +30,7 @@ export type StoredPasskey = {
 };
 export type StoredChallenge = { id: string; challenge: string };
 
-export class AgentRailDatabase {
+export class SpendSealDatabase {
   readonly db: Database.Database;
 
   constructor(filename: string) {
@@ -220,7 +220,7 @@ export class AgentRailDatabase {
       VALUES (?, 'novadesk', ?, ?, ?, 'INR', ?, ?, 1, 1)
     `);
     const seed = this.db.transaction(() => {
-      this.db.prepare("INSERT OR IGNORE INTO demo_buyers (id, username, display_name, created_at) VALUES ('demo-buyer', 'buyer@agentrail.demo', 'AgentRail Demo Buyer', ?)").run(new Date().toISOString());
+      this.db.prepare("INSERT OR IGNORE INTO demo_buyers (id, username, display_name, created_at) VALUES ('demo-buyer', 'buyer@spendseal.demo', 'SpendSeal Demo Buyer', ?)").run(new Date().toISOString());
       insert.run("starter", "Starter", "Essential focus tools for individuals.", 49_900, 0, 0);
       insert.run("pro-annual", "Pro Annual", "Automation and collaboration for growing teams.", 99_900, 1, 7);
       insert.run("business-annual", "Business Annual", "Governance and analytics for established teams.", 149_900, 1, 14);
@@ -270,21 +270,21 @@ export class AgentRailDatabase {
     this.db.prepare("UPDATE passkey_credentials SET counter = ? WHERE credential_id = ?").run(counter, credentialId);
   }
 
-  createWebAuthnChallenge(input: { buyerId?: string; intentLockId?: string | null; purpose: "registration" | "authentication"; challenge: string }): StoredChallenge {
+  createWebAuthnChallenge(input: { buyerId?: string; purchasePermitId?: string | null; purpose: "registration" | "authentication"; challenge: string }): StoredChallenge {
     const id = randomUUID();
     const now = new Date();
     this.db.prepare(`INSERT INTO webauthn_challenges
       (id, buyer_id, intent_lock_id, purpose, challenge, expires_at, consumed_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`
-    ).run(id, input.buyerId ?? "demo-buyer", input.intentLockId ?? null, input.purpose, input.challenge, new Date(now.getTime() + 5 * 60_000).toISOString(), now.toISOString());
+    ).run(id, input.buyerId ?? "demo-buyer", input.purchasePermitId ?? null, input.purpose, input.challenge, new Date(now.getTime() + 5 * 60_000).toISOString(), now.toISOString());
     return { id, challenge: input.challenge };
   }
 
-  consumeWebAuthnChallenge(input: { id: string; buyerId?: string; intentLockId?: string | null; purpose: "registration" | "authentication" }): StoredChallenge | null {
+  consumeWebAuthnChallenge(input: { id: string; buyerId?: string; purchasePermitId?: string | null; purpose: "registration" | "authentication" }): StoredChallenge | null {
     const transaction = this.db.transaction(() => {
       const row = this.db.prepare(`SELECT id, challenge, expires_at, consumed_at FROM webauthn_challenges
         WHERE id = ? AND buyer_id = ? AND purpose = ? AND intent_lock_id IS ?`
-      ).get(input.id, input.buyerId ?? "demo-buyer", input.purpose, input.intentLockId ?? null) as Row | undefined;
+      ).get(input.id, input.buyerId ?? "demo-buyer", input.purpose, input.purchasePermitId ?? null) as Row | undefined;
       if (!row || row.consumed_at || new Date(String(row.expires_at)).getTime() <= Date.now()) return null;
       this.db.prepare("UPDATE webauthn_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").run(new Date().toISOString(), input.id);
       return { id: String(row.id), challenge: String(row.challenge) };
@@ -292,59 +292,59 @@ export class AgentRailDatabase {
     return transaction();
   }
 
-  exchangeApprovalToken(intentLockId: string, token: string): { sessionToken: string; expiresAt: string } | null {
+  exchangeApprovalToken(purchasePermitId: string, token: string): { sessionToken: string; expiresAt: string } | null {
     const transaction = this.db.transaction(() => {
-      const row = this.db.prepare("SELECT approval_token_hash, approval_token_exchanged_at, status, expires_at FROM intent_locks WHERE id = ?").get(intentLockId) as Row | undefined;
+      const row = this.db.prepare("SELECT approval_token_hash, approval_token_exchanged_at, status, expires_at FROM intent_locks WHERE id = ?").get(purchasePermitId) as Row | undefined;
       if (!row || !safeHashEqual(sha256(token), String(row.approval_token_hash)) || row.approval_token_exchanged_at || row.status !== "pending_confirmation" || new Date(String(row.expires_at)).getTime() <= Date.now()) return null;
       const sessionToken = randomBytes(32).toString("base64url");
       const now = new Date().toISOString();
-      this.db.prepare("UPDATE intent_locks SET approval_token_exchanged_at = ? WHERE id = ? AND approval_token_exchanged_at IS NULL").run(now, intentLockId);
+      this.db.prepare("UPDATE intent_locks SET approval_token_exchanged_at = ? WHERE id = ? AND approval_token_exchanged_at IS NULL").run(now, purchasePermitId);
       this.db.prepare(`INSERT INTO approval_sessions (token_hash, intent_lock_id, buyer_id, expires_at, used_at, created_at)
         VALUES (?, ?, 'demo-buyer', ?, NULL, ?)`
-      ).run(sha256(sessionToken), intentLockId, String(row.expires_at), now);
+      ).run(sha256(sessionToken), purchasePermitId, String(row.expires_at), now);
       return { sessionToken, expiresAt: String(row.expires_at) };
     });
     return transaction();
   }
 
-  getApprovalSession(intentLockId: string, sessionToken: string): { buyerId: string } | null {
-    const row = this.db.prepare("SELECT buyer_id, expires_at, used_at FROM approval_sessions WHERE token_hash = ? AND intent_lock_id = ?").get(sha256(sessionToken), intentLockId) as Row | undefined;
+  getApprovalSession(purchasePermitId: string, sessionToken: string): { buyerId: string } | null {
+    const row = this.db.prepare("SELECT buyer_id, expires_at, used_at FROM approval_sessions WHERE token_hash = ? AND intent_lock_id = ?").get(sha256(sessionToken), purchasePermitId) as Row | undefined;
     if (!row || row.used_at || new Date(String(row.expires_at)).getTime() <= Date.now()) return null;
     return { buyerId: String(row.buyer_id) };
   }
 
-  consumeApprovalSession(intentLockId: string, sessionToken: string): boolean {
-    const result = this.db.prepare("UPDATE approval_sessions SET used_at = ? WHERE token_hash = ? AND intent_lock_id = ? AND used_at IS NULL AND expires_at > ?").run(new Date().toISOString(), sha256(sessionToken), intentLockId, new Date().toISOString());
+  consumeApprovalSession(purchasePermitId: string, sessionToken: string): boolean {
+    const result = this.db.prepare("UPDATE approval_sessions SET used_at = ? WHERE token_hash = ? AND intent_lock_id = ? AND used_at IS NULL AND expires_at > ?").run(new Date().toISOString(), sha256(sessionToken), purchasePermitId, new Date().toISOString());
     return result.changes === 1;
   }
 
-  completePasskeyApproval(input: { intentLockId: string; sessionToken: string; credentialId: string; newCounter: number; deviceType: string; backedUp: boolean; userVerified: boolean }): IntentLock | null {
+  completePasskeyApproval(input: { purchasePermitId: string; sessionToken: string; credentialId: string; newCounter: number; deviceType: string; backedUp: boolean; userVerified: boolean }): PurchasePermit | null {
     const transaction = this.db.transaction(() => {
-      const session = this.getApprovalSession(input.intentLockId, input.sessionToken);
-      const current = this.getIntent(input.intentLockId);
+      const session = this.getApprovalSession(input.purchasePermitId, input.sessionToken);
+      const current = this.getIntent(input.purchasePermitId);
       if (!session || !current || current.status !== "pending_confirmation") return null;
-      if (!this.consumeApprovalSession(input.intentLockId, input.sessionToken)) return null;
+      if (!this.consumeApprovalSession(input.purchasePermitId, input.sessionToken)) return null;
       this.updatePasskeyCounter(input.credentialId, input.newCounter);
       const confirmedAt = new Date().toISOString();
-      this.db.prepare("UPDATE intent_locks SET confirmed_at = ?, status = 'confirmed' WHERE id = ?").run(confirmedAt, input.intentLockId);
-      this.appendAudit({ runId: current.runId, intentLockId: current.id, eventType: "PASSKEY_VERIFIED", actor: "buyer", reasonCode: null, payload: { credentialIdHash: sha256(input.credentialId), deviceType: input.deviceType, backedUp: input.backedUp, userVerified: input.userVerified } });
-      this.appendAudit({ runId: current.runId, intentLockId: current.id, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt, method: "passkey", identityAssurance: "device-bound-demo-buyer-not-kyc" } });
-      return this.getIntent(input.intentLockId)!;
+      this.db.prepare("UPDATE intent_locks SET confirmed_at = ?, status = 'confirmed' WHERE id = ?").run(confirmedAt, input.purchasePermitId);
+      this.appendAudit({ runId: current.runId, purchasePermitId: current.id, eventType: "PASSKEY_VERIFIED", actor: "buyer", reasonCode: null, payload: { credentialIdHash: sha256(input.credentialId), deviceType: input.deviceType, backedUp: input.backedUp, userVerified: input.userVerified } });
+      this.appendAudit({ runId: current.runId, purchasePermitId: current.id, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt, method: "passkey", identityAssurance: "device-bound-demo-buyer-not-kyc" } });
+      return this.getIntent(input.purchasePermitId)!;
     });
     return transaction();
   }
 
-  completeInsecureDemoApproval(intentLockId: string, sessionToken: string): IntentLock | null {
+  completeInsecureDemoApproval(purchasePermitId: string, sessionToken: string): PurchasePermit | null {
     const transaction = this.db.transaction(() => {
-      const session = this.getApprovalSession(intentLockId, sessionToken);
-      const current = this.getIntent(intentLockId);
+      const session = this.getApprovalSession(purchasePermitId, sessionToken);
+      const current = this.getIntent(purchasePermitId);
       if (!session || !current || current.status !== "pending_confirmation") return null;
-      if (!this.consumeApprovalSession(intentLockId, sessionToken)) return null;
+      if (!this.consumeApprovalSession(purchasePermitId, sessionToken)) return null;
       const confirmedAt = new Date().toISOString();
-      this.db.prepare("UPDATE intent_locks SET confirmed_at = ?, status = 'confirmed' WHERE id = ?").run(confirmedAt, intentLockId);
-      this.appendAudit({ runId: current.runId, intentLockId, eventType: "INSECURE_DEMO_APPROVAL", actor: "buyer", reasonCode: null, payload: { confirmedAt, warning: "Mock-only approval without identity verification" } });
-      this.appendAudit({ runId: current.runId, intentLockId, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt, method: "insecure-demo", identityAssurance: "none" } });
-      return this.getIntent(intentLockId)!;
+      this.db.prepare("UPDATE intent_locks SET confirmed_at = ?, status = 'confirmed' WHERE id = ?").run(confirmedAt, purchasePermitId);
+      this.appendAudit({ runId: current.runId, purchasePermitId, eventType: "INSECURE_DEMO_APPROVAL", actor: "buyer", reasonCode: null, payload: { confirmedAt, warning: "Mock-only approval without identity verification" } });
+      this.appendAudit({ runId: current.runId, purchasePermitId, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt, method: "insecure-demo", identityAssurance: "none" } });
+      return this.getIntent(purchasePermitId)!;
     });
     return transaction();
   }
@@ -356,7 +356,7 @@ export class AgentRailDatabase {
       this.db.prepare("UPDATE demo_runs SET active = 0 WHERE active = 1").run();
       this.db.prepare("INSERT INTO demo_runs (id, active, created_at) VALUES (?, 1, ?)").run(runId, now);
       this.db.prepare("UPDATE products SET price_paise = CASE id WHEN 'starter' THEN 49900 WHEN 'pro-annual' THEN 99900 WHEN 'business-annual' THEN 149900 END, refundable = CASE id WHEN 'starter' THEN 0 ELSE 1 END, refund_window_days = CASE id WHEN 'starter' THEN 0 WHEN 'pro-annual' THEN 7 ELSE 14 END, active = 1, version = version + 1").run();
-      this.appendAudit({ runId, intentLockId: null, eventType: "DEMO_RUN_STARTED", actor, reasonCode: null, payload: { resetCatalog: true } });
+      this.appendAudit({ runId, purchasePermitId: null, eventType: "DEMO_RUN_STARTED", actor, reasonCode: null, payload: { resetCatalog: true } });
     });
     transaction();
     return runId;
@@ -384,11 +384,11 @@ export class AgentRailDatabase {
       id,
     );
     const updated = this.getProduct(id)!;
-    this.appendAudit({ runId: this.currentRunId(), intentLockId: null, eventType: "CATALOG_CHANGED", actor: "merchant", reasonCode: null, payload: { before: product, after: updated } });
+    this.appendAudit({ runId: this.currentRunId(), purchasePermitId: null, eventType: "CATALOG_CHANGED", actor: "merchant", reasonCode: null, payload: { before: product, after: updated } });
     return updated;
   }
 
-  createIntent(data: Omit<IntentLock, "id" | "runId" | "idempotencyKey" | "status" | "createdAt" | "confirmedAt">): { intent: IntentLock; approvalToken: string } {
+  createIntent(data: Omit<PurchasePermit, "id" | "runId" | "idempotencyKey" | "status" | "createdAt" | "confirmedAt">): { intent: PurchasePermit; approvalToken: string } {
     const id = randomUUID();
     const runId = this.currentRunId();
     const idempotencyKey = `intent_${randomUUID()}`;
@@ -408,38 +408,38 @@ export class AgentRailDatabase {
       idempotencyKey, sha256(approvalToken), createdAt,
     );
     const intent = this.getIntent(id)!;
-    this.appendAudit({ runId, intentLockId: id, eventType: "INTENT_LOCK_CREATED", actor: "chatgpt", reasonCode: null, payload: { intent } });
+    this.appendAudit({ runId, purchasePermitId: id, eventType: "PURCHASE_PERMIT_CREATED", actor: "chatgpt", reasonCode: null, payload: { intent } });
     return { intent, approvalToken };
   }
 
-  getIntent(id: string): IntentLock | null {
+  getIntent(id: string): PurchasePermit | null {
     const row = this.db.prepare("SELECT * FROM intent_locks WHERE id = ?").get(id) as Row | undefined;
     return row ? mapIntent(row) : null;
   }
 
-  approveIntent(id: string): IntentLock | null {
+  approveIntent(id: string): PurchasePermit | null {
     const row = this.db.prepare("SELECT status FROM intent_locks WHERE id = ?").get(id) as Row | undefined;
     if (!row || row.status !== "pending_confirmation") return null;
     const confirmedAt = new Date().toISOString();
     this.db.prepare("UPDATE intent_locks SET confirmed_at = ?, status = 'confirmed' WHERE id = ?").run(confirmedAt, id);
     const intent = this.getIntent(id)!;
-    this.appendAudit({ runId: intent.runId, intentLockId: id, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt } });
+    this.appendAudit({ runId: intent.runId, purchasePermitId: id, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { confirmedAt } });
     return intent;
   }
 
-  updateIntentStatus(id: string, status: IntentLock["status"]): IntentLock {
+  updateIntentStatus(id: string, status: PurchasePermit["status"]): PurchasePermit {
     this.db.prepare("UPDATE intent_locks SET status = ? WHERE id = ?").run(status, id);
     const intent = this.getIntent(id);
-    if (!intent) throw new Error("IntentLock not found");
+    if (!intent) throw new Error("PurchasePermit not found");
     return intent;
   }
 
-  claimOrder(intent: IntentLock, product: Product, observedAt: string): { order: PaymentOrder; claimed: boolean } {
+  claimOrder(intent: PurchasePermit, product: Product, observedAt: string): { order: PaymentOrder; claimed: boolean } {
     const existing = this.getOrderByIntent(intent.id);
     if (existing) return { order: existing, claimed: false };
     const order: PaymentOrder = {
       id: randomUUID(),
-      intentLockId: intent.id,
+      purchasePermitId: intent.id,
       providerOrderId: "pending",
       amountPaise: product.pricePaise,
       currency: "INR",
@@ -457,7 +457,7 @@ export class AgentRailDatabase {
         (id, intent_lock_id, provider_order_id, amount_paise, currency, checkout_token, status, payment_id, created_at,
          observed_product_version, observed_snapshot_hash, catalog_authority, observed_at)
         VALUES (?, ?, NULL, ?, 'INR', ?, 'creating', NULL, ?, ?, ?, ?, ?)`
-      ).run(order.id, order.intentLockId, product.pricePaise, order.checkoutToken, order.createdAt, order.observedProductVersion, order.observedProductSnapshotHash, order.catalogAuthority, order.observedAt);
+      ).run(order.id, order.purchasePermitId, product.pricePaise, order.checkoutToken, order.createdAt, order.observedProductVersion, order.observedProductSnapshotHash, order.catalogAuthority, order.observedAt);
       this.updateIntentStatus(intent.id, "executing");
       return { order, claimed: true };
     } catch (error) {
@@ -470,21 +470,21 @@ export class AgentRailDatabase {
   completeOrderClaim(orderId: string, providerOrderId: string): PaymentOrder {
     this.db.prepare("UPDATE payment_orders SET provider_order_id = ?, status = 'ready' WHERE id = ?").run(providerOrderId, orderId);
     const order = this.getOrder(orderId)!;
-    this.updateIntentStatus(order.intentLockId, "checkout_ready");
+    this.updateIntentStatus(order.purchasePermitId, "checkout_ready");
     return order;
   }
 
   markReconciliationRequired(orderId: string): PaymentOrder {
     this.db.prepare("UPDATE payment_orders SET status = 'reconciliation_required' WHERE id = ?").run(orderId);
     const order = this.getOrder(orderId)!;
-    this.updateIntentStatus(order.intentLockId, "reconciliation_required");
+    this.updateIntentStatus(order.purchasePermitId, "reconciliation_required");
     return order;
   }
 
   markPaid(orderId: string, paymentId: string): PaymentOrder {
     this.db.prepare("UPDATE payment_orders SET status = 'paid', payment_id = ? WHERE id = ? AND status != 'paid'").run(paymentId, orderId);
     const order = this.getOrder(orderId)!;
-    this.updateIntentStatus(order.intentLockId, "paid");
+    this.updateIntentStatus(order.purchasePermitId, "paid");
     return order;
   }
 
@@ -493,8 +493,8 @@ export class AgentRailDatabase {
     return row ? mapOrder(row) : null;
   }
 
-  getOrderByIntent(intentLockId: string): PaymentOrder | null {
-    const row = this.db.prepare("SELECT * FROM payment_orders WHERE intent_lock_id = ?").get(intentLockId) as Row | undefined;
+  getOrderByIntent(purchasePermitId: string): PaymentOrder | null {
+    const row = this.db.prepare("SELECT * FROM payment_orders WHERE intent_lock_id = ?").get(purchasePermitId) as Row | undefined;
     return row ? mapOrder(row) : null;
   }
 
@@ -517,21 +517,22 @@ export class AgentRailDatabase {
     return result.changes === 1;
   }
 
-  appendAudit(input: { runId: string; intentLockId: string | null; eventType: string; actor: AuditActor; reasonCode: ReasonCode | null; payload: unknown }): AuditEvent {
+  appendAudit(input: { runId: string; purchasePermitId: string | null; eventType: string; actor: AuditActor; reasonCode: ReasonCode | null; payload: unknown }): AuditEvent {
     const previous = this.db.prepare("SELECT hash FROM audit_events ORDER BY sequence DESC LIMIT 1").get() as Row | undefined;
     const previousHash = previous ? String(previous.hash) : "GENESIS";
     const createdAt = new Date().toISOString();
-    const hashable = { ...input, previousHash, createdAt };
+    const { purchasePermitId, ...rest } = input;
+    const hashable = { ...rest, intentLockId: purchasePermitId, previousHash, createdAt };
     const hash = hashAuditPayload(previousHash, hashable);
     const result = this.db.prepare(`INSERT INTO audit_events (run_id, intent_lock_id, event_type, actor, reason_code, payload_json, previous_hash, hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      input.runId, input.intentLockId, input.eventType, input.actor, input.reasonCode, JSON.stringify(input.payload), previousHash, hash, createdAt,
+      input.runId, input.purchasePermitId, input.eventType, input.actor, input.reasonCode, JSON.stringify(input.payload), previousHash, hash, createdAt,
     );
     return { sequence: Number(result.lastInsertRowid), ...input, previousHash, hash, createdAt };
   }
 
-  getAuditTrail(intentLockId?: string, runId?: string): AuditEvent[] {
+  getAuditTrail(purchasePermitId?: string, runId?: string): AuditEvent[] {
     let rows: Row[];
-    if (intentLockId) rows = this.db.prepare("SELECT * FROM audit_events WHERE intent_lock_id = ? ORDER BY sequence").all(intentLockId) as Row[];
+    if (purchasePermitId) rows = this.db.prepare("SELECT * FROM audit_events WHERE intent_lock_id = ? ORDER BY sequence").all(purchasePermitId) as Row[];
     else if (runId) rows = this.db.prepare("SELECT * FROM audit_events WHERE run_id = ? ORDER BY sequence").all(runId) as Row[];
     else rows = this.db.prepare("SELECT * FROM audit_events ORDER BY sequence").all() as Row[];
     return rows.map(mapAudit);
@@ -543,7 +544,7 @@ export class AgentRailDatabase {
     for (const event of events) {
       const hashable = {
         runId: event.runId,
-        intentLockId: event.intentLockId,
+        intentLockId: event.purchasePermitId,
         eventType: event.eventType,
         actor: event.actor,
         reasonCode: event.reasonCode,
@@ -563,11 +564,11 @@ export class AgentRailDatabase {
 function mapProduct(row: Row): Product {
   return { id: String(row.id), merchantId: String(row.merchant_id), name: String(row.name), description: String(row.description), pricePaise: Number(row.price_paise), currency: "INR", refundable: Boolean(row.refundable), refundWindowDays: Number(row.refund_window_days), active: Boolean(row.active), version: Number(row.version), catalogAuthority: CATALOG_AUTHORITY, refundTermsAuthority: REFUND_TERMS_AUTHORITY };
 }
-function mapIntent(row: Row): IntentLock {
-  return { id: String(row.id), runId: String(row.run_id), merchantId: String(row.merchant_id), productId: String(row.product_id), quantity: 1, currency: "INR", productSnapshotHash: String(row.product_snapshot_hash), lockedUnitPricePaise: Number(row.locked_unit_price_paise), maxTotalPaise: Number(row.max_total_paise), priceChangePolicy: row.price_change_policy as IntentLock["priceChangePolicy"], requireRefundable: Boolean(row.require_refundable), minimumRefundWindowDays: row.minimum_refund_window_days === null ? null : Number(row.minimum_refund_window_days), expiresAt: String(row.expires_at), confirmationRequired: true, confirmedAt: row.confirmed_at ? String(row.confirmed_at) : null, idempotencyKey: String(row.idempotency_key), status: row.status as IntentLock["status"], createdAt: String(row.created_at) };
+function mapIntent(row: Row): PurchasePermit {
+  return { id: String(row.id), runId: String(row.run_id), merchantId: String(row.merchant_id), productId: String(row.product_id), quantity: 1, currency: "INR", productSnapshotHash: String(row.product_snapshot_hash), lockedUnitPricePaise: Number(row.locked_unit_price_paise), maxTotalPaise: Number(row.max_total_paise), priceChangePolicy: row.price_change_policy as PurchasePermit["priceChangePolicy"], requireRefundable: Boolean(row.require_refundable), minimumRefundWindowDays: row.minimum_refund_window_days === null ? null : Number(row.minimum_refund_window_days), expiresAt: String(row.expires_at), confirmationRequired: true, confirmedAt: row.confirmed_at ? String(row.confirmed_at) : null, idempotencyKey: String(row.idempotency_key), status: row.status as PurchasePermit["status"], createdAt: String(row.created_at) };
 }
 function mapOrder(row: Row): PaymentOrder {
-  return { id: String(row.id), intentLockId: String(row.intent_lock_id), providerOrderId: row.provider_order_id ? String(row.provider_order_id) : "pending", amountPaise: Number(row.amount_paise), currency: "INR", checkoutToken: String(row.checkout_token), status: row.status as PaymentOrder["status"], paymentId: row.payment_id ? String(row.payment_id) : null, createdAt: String(row.created_at), observedProductVersion: Number(row.observed_product_version), observedProductSnapshotHash: String(row.observed_snapshot_hash), catalogAuthority: CATALOG_AUTHORITY, observedAt: String(row.observed_at) };
+  return { id: String(row.id), purchasePermitId: String(row.intent_lock_id), providerOrderId: row.provider_order_id ? String(row.provider_order_id) : "pending", amountPaise: Number(row.amount_paise), currency: "INR", checkoutToken: String(row.checkout_token), status: row.status as PaymentOrder["status"], paymentId: row.payment_id ? String(row.payment_id) : null, createdAt: String(row.created_at), observedProductVersion: Number(row.observed_product_version), observedProductSnapshotHash: String(row.observed_snapshot_hash), catalogAuthority: CATALOG_AUTHORITY, observedAt: String(row.observed_at) };
 }
 
 function mapPasskey(row: Row): StoredPasskey {
@@ -580,5 +581,5 @@ function safeHashEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 function mapAudit(row: Row): AuditEvent {
-  return { sequence: Number(row.sequence), runId: String(row.run_id), intentLockId: row.intent_lock_id ? String(row.intent_lock_id) : null, eventType: String(row.event_type), actor: row.actor as AuditActor, reasonCode: row.reason_code ? (String(row.reason_code) as ReasonCode) : null, payload: JSON.parse(String(row.payload_json)), previousHash: String(row.previous_hash), hash: String(row.hash), createdAt: String(row.created_at) };
+  return { sequence: Number(row.sequence), runId: String(row.run_id), purchasePermitId: row.intent_lock_id ? String(row.intent_lock_id) : null, eventType: String(row.event_type), actor: row.actor as AuditActor, reasonCode: row.reason_code ? (String(row.reason_code) as ReasonCode) : null, payload: JSON.parse(String(row.payload_json)), previousHash: String(row.previous_hash), hash: String(row.hash), createdAt: String(row.created_at) };
 }

@@ -4,9 +4,9 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool, type PoolClient } from "pg";
 import * as schema from "./schema.js";
 
-export type AgentRailDb = NodePgDatabase<typeof schema>;
+export type SpendSealDb = NodePgDatabase<typeof schema>;
 
-export function createDatabase(databaseUrl: string): { pool: Pool; db: AgentRailDb } {
+export function createDatabase(databaseUrl: string): { pool: Pool; db: SpendSealDb } {
   const pool = new Pool({ connectionString: databaseUrl, max: 12, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
   pool.on("error", (error) => console.error(JSON.stringify({ level: "error", event: "postgres_pool_error", message: error.message })));
   return { pool, db: drizzle(pool, { schema }) };

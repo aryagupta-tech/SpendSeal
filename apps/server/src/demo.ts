@@ -1,10 +1,10 @@
-import { AgentRailError, AgentRailService } from "./service.js";
-import { AgentRailStore } from "./store.js";
+import { SpendSealError, SpendSealService } from "./service.js";
+import { SpendSealStore } from "./store.js";
 
-export async function seedNovaDesk(store: AgentRailStore, service: AgentRailService, ownerUserId: string) {
+export async function seedNovaDesk(store: SpendSealStore, service: SpendSealService, ownerUserId: string) {
   let merchant = (await store.listMerchants({ query: "novadesk", userId: ownerUserId })).merchants.find((value) => value.slug === "novadesk");
   if (!merchant) merchant = await store.createMerchant(ownerUserId, { slug: "novadesk", displayName: "NovaDesk (Demo)" });
-  else if (!await store.requireMembership(ownerUserId, merchant.id, ["owner"])) throw new AgentRailError(409, "DEMO_MERCHANT_OWNED", "The NovaDesk demo slug belongs to another account.");
+  else if (!await store.requireMembership(ownerUserId, merchant.id, ["owner"])) throw new SpendSealError(409, "DEMO_MERCHANT_OWNED", "The NovaDesk demo slug belongs to another account.");
   if (!(await store.paymentConfig(merchant.id))) await service.configurePayments(merchant.id, { adapter: "mock" });
   const existing = await store.listProducts(merchant.id, undefined, 100, undefined, true);
   const products = [

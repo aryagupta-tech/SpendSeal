@@ -1,5 +1,5 @@
 {
-  "name": "@agentrail/web",
+  "name": "@spendseal/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentrail/core": "*",
+    "@spendseal/core": "*",
     "@simplewebauthn/browser": "^13.3.0",
     "@vitejs/plugin-react": "^5.0.2",
     "lucide-react": "^0.468.0",

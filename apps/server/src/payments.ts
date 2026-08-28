@@ -18,7 +18,7 @@ export interface PaymentAdapter {
 
 export class MockPaymentAdapter implements PaymentAdapter {
   readonly kind = "mock" as const;
-  readonly publicKeyId = "rzp_test_agentrail_mock";
+  readonly publicKeyId = "rzp_test_spendseal_mock";
   readonly secret: string;
   createOrderCalls = 0;
   failNextAsAmbiguous = false;

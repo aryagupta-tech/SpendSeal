@@ -27,7 +27,7 @@ ENV NODE_ENV=production \
     DATABASE_URL=postgresql://agentrail:agentrail@postgres:5432/agentrail \
     WEBAUTHN_RP_ID=localhost \
     WEBAUTHN_ORIGIN=http://localhost:43117 \
-    WEBAUTHN_RP_NAME="AgentRail"
+    WEBAUTHN_RP_NAME="SpendSeal"
 
 WORKDIR /app
 
