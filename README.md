@@ -36,6 +36,39 @@ The checked-in build has been verified with:
 
 The Playwright specification covers the complete account → merchant → product → PurchasePermit → passkey → mock payment → audit flow. On macOS it requires a locally runnable Playwright Chromium installation with WebAuthn virtual-authenticator support.
 
+## Deploy on Vercel
+
+SpendSeal is configured as one Vercel project: Vercel serves the built React files and runs the Express REST, OAuth, MCP, and webhook routes as one function. PostgreSQL remains an external managed database because Vercel does not provide a built-in PostgreSQL database.
+
+Use the permanent **Production** domain for every security setting. Do not use a changing Preview deployment hostname for passkeys or OAuth.
+
+1. Import this GitHub repository in Vercel and keep the repository root as the project root. The checked-in `vercel.json` supplies the build command and function configuration.
+2. In the Vercel Marketplace, create and connect a PostgreSQL provider such as Neon. Ensure the project receives a pooled `DATABASE_URL`. A new Vercel database starts empty; local OrbStack data is not copied automatically.
+3. Choose the permanent production address before registering a passkey, for example `https://spendseal.vercel.app`.
+4. Add these Production environment variables in **Project Settings → Environment Variables**:
+
+   ```dotenv
+   DATABASE_URL=the_pooled_postgresql_url_from_your_database_provider
+   CREDENTIAL_ENCRYPTION_KEY=a_new_base64_encoded_32_byte_secret
+   CREDENTIAL_ENCRYPTION_KEY_VERSION=1
+   PUBLIC_BASE_URL=https://spendseal.vercel.app
+   OAUTH_ISSUER=https://spendseal.vercel.app
+   WEBAUTHN_ORIGIN=https://spendseal.vercel.app
+   WEBAUTHN_RP_ID=spendseal.vercel.app
+   WEBAUTHN_RP_NAME=SpendSeal
+   SESSION_IDLE_MINUTES=30
+   SESSION_ABSOLUTE_HOURS=8
+   DEMO_MODE=false
+   ```
+
+   Generate `CREDENTIAL_ENCRYPTION_KEY` locally with `openssl rand -base64 32`. Enter it directly in Vercel; never send it in chat or commit it. Replace the example domain everywhere with the exact production hostname and do not include a trailing slash.
+5. Deploy to Production, then open `https://your-production-domain/api/v1/health`. A successful response reports PostgreSQL and migrations ready.
+6. Register a new passkey on the production domain, create the merchant, and reconnect Shopify and Razorpay Test Mode. Passkeys enrolled on `localhost` or a temporary tunnel intentionally do not work on the Vercel hostname.
+7. Connect ChatGPT Developer Mode to `https://your-production-domain/mcp` and complete OAuth again.
+8. After Razorpay Test Mode is connected, copy SpendSeal’s newly generated webhook secret once and create the Razorpay webhook at `https://your-production-domain/api/webhooks/razorpay/{merchantId}`. Subscribe to `payment.captured` and `payment.failed`.
+
+The serverless entry point caches the Express application per warm function, limits each function instance’s PostgreSQL pool, and serializes migrations with a PostgreSQL transaction advisory lock so concurrent cold starts cannot apply the same migration twice. Vercel builds generate `public/` from the React production output; that directory is intentionally ignored by Git.
+
 ## Run with OrbStack (recommended)
 
 Requirements: OrbStack with Docker Compose support.
