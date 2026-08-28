@@ -35,7 +35,12 @@ export function Login() {
         const response = await startAuthentication({ optionsJSON: start.options });
         await api("/api/v1/auth/passkeys/login/verify", { method: "POST", body: JSON.stringify({ challengeId: start.challengeId, response }) });
       }
-      const returnTo = params.get("returnTo"); navigate(returnTo?.startsWith("/") ? returnTo : "/", { replace: true });
+      const returnTo = params.get("returnTo");
+      if (returnTo?.startsWith("/oauth/")) {
+        window.location.replace(returnTo);
+        return;
+      }
+      navigate(returnTo?.startsWith("/") ? returnTo : "/", { replace: true });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Passkey authentication failed"); }
     finally { setBusy(false); }
   }
