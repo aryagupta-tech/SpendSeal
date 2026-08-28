@@ -30,6 +30,23 @@ export class SpendSealService {
   async prepareCheckout(buyerId: string, purchasePermitId: string): Promise<{ intent: PurchasePermit; decision: PolicyDecision; checkoutUrl?: string; orderStatus?: string }> {
     const initial = await this.store.getIntent(purchasePermitId, buyerId);
     if (!initial) throw new SpendSealError(404, "INTENT_NOT_FOUND", "PurchasePermit not found for this buyer.");
+    const existingOrder = await this.store.getOrderByIntent(initial.id);
+    const shopifyReference = !existingOrder ? await this.store.shopifyProductReference(initial.merchantId, initial.productId) : null;
+    if (shopifyReference) {
+      const connection = await this.store.catalogConnection(initial.merchantId);
+      try {
+        if (!connection || connection.provider !== "shopify") throw new ShopifyError("SHOPIFY_CONNECTION_MISSING", "The Shopify catalog connection is unavailable.");
+        const client = new ShopifyAdminClient(connection.shopDomain, this.vault.decrypt(connection.accessTokenCiphertext));
+        const observation = await client.productVariant(shopifyReference.externalId);
+        await this.store.refreshShopifyProductForPolicy(initial.id, connection, observation);
+      } catch (error) {
+        const now = new Date().toISOString();
+        const product = await this.store.getProduct(initial.merchantId, initial.productId);
+        const decision: PolicyDecision = { allowed: false, reasons: ["CATALOG_REFRESH_FAILED"], message: "Checkout paused because SpendSeal could not re-check the authoritative Shopify product. No payment order was created.", evaluatedAt: now, observedAt: now, observedPricePaise: product?.pricePaise ?? 0, observedProductVersion: product?.version ?? null, observedProductRevisionId: product?.revisionId ?? null, observedProductSnapshotHash: product?.snapshotHash ?? null, catalogAuthority: product?.catalogAuthority ?? null };
+        await this.store.appendAudit({ scopeType: "intent", scopeId: initial.id, merchantId: initial.merchantId, purchasePermitId: initial.id, eventType: "AUTHORITATIVE_PRODUCT_REFRESH_FAILED", actor: "policy_engine", reasonCode: "CATALOG_REFRESH_FAILED", payload: { source: "shopify_admin_graphql", errorCode: error instanceof ShopifyError ? error.code : "SHOPIFY_REQUEST_FAILED", decision } });
+        return { intent: initial, decision };
+      }
+    }
     const paymentConfig = await this.store.paymentConfig(initial.merchantId);
     if (!paymentConfig) {
       const now = new Date().toISOString();
@@ -52,7 +69,7 @@ export class SpendSealService {
     try {
       const adapter = this.adapter(paymentConfig);
       const providerOrder = await adapter.createOrder({ amountPaise: preparation.product.pricePaise, currency: "INR", receipt: preparation.intent.idempotencyKey, notes: { intent_lock_id: preparation.intent.id, merchant_id: preparation.intent.merchantId, buyer_id: preparation.intent.buyerId, product_id: preparation.intent.productId, observed_product_version: String(preparation.product.version), observed_revision_id: preparation.product.revisionId, observed_snapshot_hash: preparation.product.snapshotHash } });
-      const order = await this.store.completeOrder(preparation.order.id, providerOrder.id);
+      const order = await this.store.completeOrder(preparation.order.id, providerOrder.id, paymentConfig.adapter);
       return { intent: { ...preparation.intent, status: "checkout_ready" }, decision: preparation.decision, checkoutUrl: `${this.config.publicBaseUrl}/checkout/${order.checkoutToken}`, orderStatus: order.status };
     } catch (error) {
       await this.store.markReconciliation(preparation.order.id, error instanceof Error ? error.message : "Unknown provider error");
@@ -80,7 +97,7 @@ export class SpendSealService {
       await this.store.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_SIGNATURE_REJECTED", actor: "policy_engine", reasonCode: "PAYMENT_SIGNATURE_INVALID", payload: { paymentId: input.razorpayPaymentId } });
       throw new SpendSealError(400, "PAYMENT_SIGNATURE_INVALID", "Payment signature verification failed.");
     }
-    return this.store.markPaid(order.id, input.razorpayPaymentId);
+    return this.store.markPaid(order.id, input.razorpayPaymentId, config.adapter);
   }
 
   async completeMockPayment(localOrderId: string) {
@@ -100,6 +117,15 @@ export class SpendSealService {
     const saved = await this.store.savePaymentConfig(merchantId, { adapter: input.adapter, keyId: input.adapter === "razorpay" ? input.keyId! : null, keySecretCiphertext: input.adapter === "razorpay" ? this.vault.encrypt(input.keySecret!) : null, webhookSecretCiphertext: webhookSecret ? this.vault.encrypt(webhookSecret) : null, encryptionKeyVersion: this.vault.version });
     await this.store.appendAudit({ scopeType: "merchant", scopeId: merchantId, merchantId, purchasePermitId: null, eventType: "PAYMENT_CONFIGURATION_ROTATED", actor: "merchant", reasonCode: null, payload: { adapter: saved.adapter, keyIdPrefix: saved.keyId?.slice(0, 12) ?? null, version: saved.version } });
     return { configuration: { adapter: saved.adapter, keyId: saved.keyId, version: saved.version }, ...(webhookSecret ? { webhookSecret } : {}) };
+  }
+
+  async rotateRazorpayWebhookSecret(merchantId: string): Promise<{ configuration: { adapter: "razorpay"; keyId: string; version: number }; webhookSecret: string }> {
+    const existing = await this.store.paymentConfig(merchantId);
+    if (!existing || existing.adapter !== "razorpay" || !existing.keyId || !existing.keySecretCiphertext) throw new SpendSealError(409, "RAZORPAY_NOT_CONNECTED", "Connect Razorpay Test Mode before rotating its webhook secret.");
+    const webhookSecret = randomBytes(32).toString("hex");
+    const saved = await this.store.savePaymentConfig(merchantId, { adapter: "razorpay", keyId: existing.keyId, keySecretCiphertext: existing.keySecretCiphertext, webhookSecretCiphertext: this.vault.encrypt(webhookSecret), encryptionKeyVersion: this.vault.version });
+    await this.store.appendAudit({ scopeType: "merchant", scopeId: merchantId, merchantId, purchasePermitId: null, eventType: "RAZORPAY_WEBHOOK_SECRET_ROTATED", actor: "merchant", reasonCode: null, payload: { adapter: "razorpay", keyIdPrefix: saved.keyId?.slice(0, 12) ?? null, previousConfigurationVersion: existing.version, configurationVersion: saved.version, secretReturnedOnce: true } });
+    return { configuration: { adapter: "razorpay", keyId: saved.keyId!, version: saved.version }, webhookSecret };
   }
 
   async configureShopify(merchantId: string, userId: string, input: { shopDomain: string; accessToken: string; defaultRefundable: boolean; defaultRefundWindowDays: number }) {

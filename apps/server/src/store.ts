@@ -24,6 +24,7 @@ export type PaymentConfiguration = { merchantId: string; adapter: "mock" | "razo
 export type CatalogConnection = { merchantId: string; provider: "shopify"; shopDomain: string; accessTokenCiphertext: string; encryptionKeyVersion: number; status: "active" | "error" | "revoked"; shopName: string; currency: string; defaultRefundable: boolean; defaultRefundWindowDays: number; lastSyncAt: string | null };
 export type MerchantRole = "owner" | "admin" | "catalog_manager" | "auditor";
 export type MerchantListing = Merchant & { role?: MerchantRole };
+export type ShopifyProductReference = { externalId: string; externalUpdatedAt: string | null };
 
 export class SpendSealStore {
   constructor(readonly pool: Pool) {}
@@ -179,6 +180,48 @@ export class SpendSealStore {
       await client.query("UPDATE merchant_catalog_connections SET last_sync_at=$2,status='active',updated_at=$2 WHERE merchant_id=$1", [connection.merchantId, syncedAt]);
       await this.appendAudit({ scopeType: "merchant", scopeId: connection.merchantId, merchantId: connection.merchantId, purchasePermitId: null, eventType: "SHOPIFY_CATALOG_SYNCED", actor: "merchant", reasonCode: null, payload: { shopDomain: connection.shopDomain, observedVariants: items.length, created, updated, unchanged, archived, syncedAt } }, client);
       return { created, updated, unchanged, archived, syncedAt };
+    });
+  }
+
+  async shopifyProductReference(merchantId: string, productId: string): Promise<ShopifyProductReference | null> {
+    const result = await this.pool.query("SELECT external_id,external_updated_at FROM products WHERE merchant_id=$1 AND id=$2 AND catalog_source='shopify_admin_graphql'", [merchantId, productId]);
+    const row = result.rows[0];
+    return row?.external_id ? { externalId: row.external_id, externalUpdatedAt: row.external_updated_at ? iso(row.external_updated_at) : null } : null;
+  }
+
+  async refreshShopifyProductForPolicy(purchasePermitId: string, connection: CatalogConnection, observation: ShopifyCatalogItem | null): Promise<Product> {
+    return transaction(this.pool, async (client) => {
+      const intentResult = await client.query("SELECT * FROM intent_locks WHERE id=$1 FOR UPDATE", [purchasePermitId]);
+      const intent = intentResult.rows[0];
+      if (!intent || intent.merchant_id !== connection.merchantId) throw new Error("INTENT_NOT_FOUND");
+      const productResult = await client.query("SELECT * FROM products WHERE merchant_id=$1 AND id=$2 AND catalog_source='shopify_admin_graphql' FOR UPDATE", [connection.merchantId, intent.product_id]);
+      const row = productResult.rows[0];
+      if (!row) throw new Error("SHOPIFY_PRODUCT_NOT_FOUND");
+      const observedAt = new Date().toISOString();
+      const item: ShopifyCatalogItem = observation ?? {
+        externalId: row.external_id,
+        sku: row.sku,
+        name: row.name,
+        description: row.description,
+        pricePaise: row.price_paise,
+        active: false,
+        externalUpdatedAt: observedAt,
+      };
+      if (item.externalId !== row.external_id) throw new Error("SHOPIFY_PRODUCT_MISMATCH");
+      const changed = row.sku !== item.sku || row.name !== item.name || row.description !== item.description || row.price_paise !== item.pricePaise || row.active !== item.active || row.refundable !== connection.defaultRefundable || row.refund_window_days !== connection.defaultRefundWindowDays;
+      if (changed) {
+        const version = row.version + 1; const revisionId = randomUUID();
+        const snapshot = productSnapshot({ id: row.id, merchantId: connection.merchantId, sku: item.sku, name: item.name, description: item.description, pricePaise: item.pricePaise, refundable: connection.defaultRefundable, refundWindowDays: connection.defaultRefundWindowDays, active: item.active, version, revisionId, catalogSource: "shopify_admin_graphql", shopDomain: connection.shopDomain, externalId: item.externalId, externalUpdatedAt: item.externalUpdatedAt });
+        await client.query("INSERT INTO product_revisions(id,merchant_id,product_id,version,snapshot_json,snapshot_hash,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,NULL,$7)", [revisionId, connection.merchantId, row.id, version, snapshot, sha256(snapshot), observedAt]);
+        await client.query(`UPDATE products SET sku=$3,name=$4,description=$5,price_paise=$6,refundable=$7,refund_window_days=$8,active=$9,version=$10,current_revision_id=$11,external_updated_at=$12,updated_at=$13 WHERE merchant_id=$1 AND id=$2`, [connection.merchantId, row.id, item.sku, item.name, item.description, item.pricePaise, connection.defaultRefundable, connection.defaultRefundWindowDays, item.active, version, revisionId, item.externalUpdatedAt, observedAt]);
+      } else {
+        await client.query("UPDATE products SET external_updated_at=$3,updated_at=$4 WHERE merchant_id=$1 AND id=$2", [connection.merchantId, row.id, item.externalUpdatedAt, observedAt]);
+      }
+      await client.query("UPDATE merchant_catalog_connections SET last_sync_at=$2,status='active',updated_at=$2 WHERE merchant_id=$1", [connection.merchantId, observedAt]);
+      const refreshed = await this.getProduct(connection.merchantId, row.id, client);
+      if (!refreshed) throw new Error("SHOPIFY_PRODUCT_NOT_FOUND");
+      await this.appendAudit({ scopeType: "intent", scopeId: purchasePermitId, merchantId: connection.merchantId, purchasePermitId, eventType: "AUTHORITATIVE_PRODUCT_REFRESHED", actor: "policy_engine", reasonCode: null, payload: { source: "shopify_admin_graphql", shopDomain: connection.shopDomain, externalIdHash: sha256(item.externalId), observedAt, productVersion: refreshed.version, productRevisionId: refreshed.revisionId, productSnapshotHash: refreshed.snapshotHash, observedPricePaise: refreshed.pricePaise, active: refreshed.active, changed } }, client);
+      return refreshed;
     });
   }
 
@@ -359,12 +402,12 @@ export class SpendSealStore {
     });
   }
 
-  async completeOrder(orderId: string, providerOrderId: string): Promise<PaymentOrder> {
+  async completeOrder(orderId: string, providerOrderId: string, adapter: "mock" | "razorpay"): Promise<PaymentOrder> {
     return transaction(this.pool, async (client) => {
       const result = await client.query("UPDATE payment_orders SET provider_order_id=$2,status='ready' WHERE id=$1 RETURNING *", [orderId, providerOrderId]);
       const order = mapOrder(result.rows[0]);
       await client.query("UPDATE intent_locks SET status='checkout_ready' WHERE id=$1", [order.purchasePermitId]);
-      await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_ORDER_CREATED", actor: "razorpay", reasonCode: null, payload: { orderId, providerOrderId, amountPaise: order.amountPaise, observedProductVersion: order.observedProductVersion, observedProductRevisionId: order.observedProductRevisionId, observedSnapshotHash: order.observedProductSnapshotHash, paymentConfigVersion: order.paymentConfigVersion } }, client);
+      await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_ORDER_CREATED", actor: adapter === "mock" ? "mock_adapter" : "razorpay", reasonCode: null, payload: { adapter, orderId, providerOrderId, amountPaise: order.amountPaise, observedProductVersion: order.observedProductVersion, observedProductRevisionId: order.observedProductRevisionId, observedSnapshotHash: order.observedProductSnapshotHash, paymentConfigVersion: order.paymentConfigVersion } }, client);
       return order;
     });
   }
@@ -377,11 +420,11 @@ export class SpendSealStore {
     });
   }
 
-  async markPaid(orderId: string, paymentId: string): Promise<PaymentOrder> {
+  async markPaid(orderId: string, paymentId: string, adapter: "mock" | "razorpay"): Promise<PaymentOrder> {
     return transaction(this.pool, async (client) => {
       const result = await client.query("UPDATE payment_orders SET status='paid',payment_id=COALESCE(payment_id,$2) WHERE id=$1 RETURNING *", [orderId, paymentId]);
       const order = mapOrder(result.rows[0]); await client.query("UPDATE intent_locks SET status='paid' WHERE id=$1", [order.purchasePermitId]);
-      await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_VERIFIED", actor: "razorpay", reasonCode: null, payload: { providerOrderId: order.providerOrderId, paymentId } }, client);
+      await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_VERIFIED", actor: adapter === "mock" ? "mock_adapter" : "razorpay", reasonCode: null, payload: { adapter, providerOrderId: order.providerOrderId, paymentId } }, client);
       return order;
     });
   }

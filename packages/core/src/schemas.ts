@@ -51,6 +51,7 @@ export const REASON_CODES = [
   "ALLOWED", "MERCHANT_MISMATCH", "PRODUCT_MISMATCH", "PRODUCT_INACTIVE", "CURRENCY_MISMATCH", "PRICE_CHANGED", "BUDGET_EXCEEDED",
   "NOT_REFUNDABLE", "REFUND_POLICY_CHANGED", "EXPIRED", "CONFIRMATION_REQUIRED", "REPLAY_DETECTED", "PAYMENT_SIGNATURE_INVALID",
   "PAYMENT_PROVIDER_UNCERTAIN", "AUTH_REQUIRED", "TENANT_ACCESS_DENIED", "PRODUCT_VERSION_CONFLICT", "PAYMENT_CONFIG_MISSING",
+  "CATALOG_REFRESH_FAILED",
 ] as const;
 export const ReasonCodeSchema = z.enum(REASON_CODES);
 export type ReasonCode = z.infer<typeof ReasonCodeSchema>;
@@ -62,7 +63,7 @@ export const PolicyDecisionSchema = z.object({
 });
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 
-export const AuditActorSchema = z.enum(["chatgpt", "buyer", "merchant", "policy_engine", "razorpay", "system"]);
+export const AuditActorSchema = z.enum(["chatgpt", "buyer", "merchant", "policy_engine", "mock_adapter", "razorpay", "system"]);
 export type AuditActor = z.infer<typeof AuditActorSchema>;
 
 export const AuditEventSchema = z.object({

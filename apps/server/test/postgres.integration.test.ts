@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
@@ -22,6 +22,7 @@ beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE rate_limits,oauth_tokens,oauth_authorization_codes,audit_events,audit_chain_heads,webhook_events,payment_orders,approval_sessions,webauthn_challenges,intent_locks,merchant_payment_configurations,product_revisions,products,merchant_api_keys,merchant_invitations,merchant_memberships,passkey_credentials,browser_sessions,merchants,users CASCADE`);
 });
 afterAll(async () => { await pool?.end(); });
+afterEach(() => vi.unstubAllGlobals());
 
 async function user(username: string) { return store.createUserWithPasskey({ username, displayName: username, rpId: "agentrail.test", credentialId: `cred_${username}`, publicKey: new Uint8Array([1, 2, 3]), counter: 0, deviceType: "singleDevice", backedUp: false, transports: ["internal"] }); }
 async function merchantProduct(ownerName = "owner") { const owner = await user(ownerName); const merchant = await store.createMerchant(owner.id, { slug: `shop-${ownerName}`, displayName: `${ownerName} Shop` }); await service.configurePayments(merchant.id, { adapter: "mock" }); const product = await store.createProduct(owner.id, merchant.id, { sku: "PLAN-1", name: "Annual Plan", description: "A real merchant product", pricePaise: 99_900, refundable: true, refundWindowDays: 7 }); return { owner, merchant, product }; }
@@ -62,6 +63,24 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect(result.decision.observedProductVersion).toBe(2); expect(result.checkoutUrl).toBeUndefined();
   });
 
+  it("automatically re-fetches the exact Shopify variant before policy evaluation", async () => {
+    const owner = await user("shopify-policy-owner"); const buyer = await user("shopify-policy-buyer");
+    const merchant = await store.createMerchant(owner.id, { slug: "shopify-policy-store", displayName: "Shopify Policy Store" });
+    await service.configurePayments(merchant.id, { adapter: "mock" });
+    const connection = await store.saveShopifyConnection({ merchantId: merchant.id, provider: "shopify", shopDomain: "agentrail-test-store.myshopify.com", accessTokenCiphertext: service.vault.encrypt("shpat_test_token_123456"), encryptionKeyVersion: service.vault.version, shopName: "Shopify Policy Store", currency: "INR", defaultRefundable: false, defaultRefundWindowDays: 0 });
+    const externalId = "gid://shopify/ProductVariant/42";
+    await store.syncShopifyProducts(owner.id, connection, [{ externalId, sku: "SHOPIFY-42", name: "Security Plan", description: "Annual access", pricePaise: 2_000, active: true, externalUpdatedAt: "2026-08-28T05:00:00.000Z" }]);
+    const product = (await store.listProducts(merchant.id)).products[0]!;
+    const created = await service.createIntent(buyer.id, { merchantId: merchant.id, productId: product.id, maxTotalPaise: 2_000, priceChangePolicy: "none", requireRefundable: false, minimumRefundWindowDays: null, expiresInMinutes: 10 }, "buyer");
+    const linkToken = new URL(created.approvalUrl).searchParams.get("token")!; const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, linkToken);
+    await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: "cred_shopify-policy-buyer", counter: 1, deviceType: "singleDevice", backedUp: false });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: { node: { id: externalId, title: "Default Title", sku: "SHOPIFY-42", price: "30.00", updatedAt: "2026-08-28T06:00:00Z", availableForSale: true, product: { id: "gid://shopify/Product/7", title: "Security Plan", description: "Annual access", status: "ACTIVE", updatedAt: "2026-08-28T06:00:00Z" } } } }), { status: 200, headers: { "content-type": "application/json" } })));
+    const result = await service.prepareCheckout(buyer.id, created.intent.id);
+    expect(result.decision.reasons).toEqual(expect.arrayContaining(["PRICE_CHANGED", "BUDGET_EXCEEDED"]));
+    expect(result.checkoutUrl).toBeUndefined(); expect(result.decision.observedPricePaise).toBe(3_000);
+    const events = await store.auditTrail("intent", created.intent.id); expect(events.map((event) => event.eventType)).toContain("AUTHORITATIVE_PRODUCT_REFRESHED");
+  });
+
   it("claims exactly one local payment attempt under concurrency and blocks replay", async () => {
     const setup = await approvedIntent(); const results = await Promise.all([service.prepareCheckout(setup.buyer.id, setup.intent.id), service.prepareCheckout(setup.buyer.id, setup.intent.id), service.prepareCheckout(setup.buyer.id, setup.intent.id)]);
     expect(results.filter((value) => value.checkoutUrl).length).toBeGreaterThanOrEqual(1);
@@ -81,6 +100,21 @@ describe("PostgreSQL tenant and payment invariants", () => {
     const result = await service.configurePayments(merchant.id, { adapter: "razorpay", keyId: "rzp_test_idempotent", keySecret: "same-test-secret" });
     expect(result.alreadyConnected).toBe(true); expect(result.configuration.version).toBe(1); expect(result.webhookSecret).toBeUndefined();
     const count = await pool.query("SELECT count(*)::int AS count FROM merchant_payment_configurations WHERE merchant_id=$1", [merchant.id]); expect(count.rows[0].count).toBe(1);
+  });
+
+  it("rotates an exposed Razorpay webhook secret once without exposing API credentials", async () => {
+    const owner = await user("webhook-owner"); const merchant = await store.createMerchant(owner.id, { slug: "webhook-shop", displayName: "Webhook Shop" });
+    const original = await store.savePaymentConfig(merchant.id, { adapter: "razorpay", keyId: "rzp_test_webhook", keySecretCiphertext: service.vault.encrypt("test-api-secret"), webhookSecretCiphertext: service.vault.encrypt("exposed-webhook-secret"), encryptionKeyVersion: service.vault.version });
+    const rotated = await service.rotateRazorpayWebhookSecret(merchant.id); expect(rotated.webhookSecret).not.toBe("exposed-webhook-secret"); expect(rotated.configuration.version).toBe(original.version + 1);
+    const active = await store.paymentConfig(merchant.id); expect(active?.keySecretCiphertext).toBe(original.keySecretCiphertext); expect(service.vault.decrypt(active!.webhookSecretCiphertext!)).toBe(rotated.webhookSecret);
+    const events = await store.auditTrail("merchant", merchant.id); expect(events.at(-1)?.eventType).toBe("RAZORPAY_WEBHOOK_SECRET_ROTATED"); expect(JSON.stringify(events.at(-1)?.payload)).not.toContain(rotated.webhookSecret);
+  });
+
+  it("labels mock payment audit events as the mock adapter", async () => {
+    const setup = await approvedIntent("mock-audit-buyer"); await service.prepareCheckout(setup.buyer.id, setup.intent.id);
+    const order = await store.getOrderByIntent(setup.intent.id); expect(order).not.toBeNull(); await service.completeMockPayment(order!.id);
+    const events = await store.auditTrail("intent", setup.intent.id); const paymentEvents = events.filter((event) => event.eventType === "PAYMENT_ORDER_CREATED" || event.eventType === "PAYMENT_VERIFIED");
+    expect(paymentEvents).toHaveLength(2); expect(paymentEvents.every((event) => event.actor === "mock_adapter")).toBe(true);
   });
 
   it("rejects audit mutation and detects offline tampering", async () => {

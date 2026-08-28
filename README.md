@@ -11,9 +11,9 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 - PostgreSQL 16 with explicit migrations and tenant-safe composite catalog references.
 - Passkey registration/login, opaque hashed sessions, HttpOnly cookies, CSRF protection, idle and absolute expiry.
 - Merchants, role memberships, one-time invitations, product CRUD, optimistic concurrency, archival, and immutable revisions.
-- Shopify Admin GraphQL catalog connection with encrypted store tokens, `read_products` scope verification, INR validation, variant synchronization, immutable revisions, and authoritative-source evidence.
+- Shopify Admin GraphQL catalog connection with encrypted store tokens, `read_products` scope verification, INR validation, variant synchronization, immutable revisions, and an automatic exact-variant re-fetch immediately before policy evaluation.
 - Merchant API keys with `ss_test_` prefix, scopes, hashes, expiry, last-use tracking, rotation-ready creation, and revocation. Existing legacy keys remain accepted until rotated.
-- Per-merchant mock or Razorpay Test Mode configuration. Secrets use AES-256-GCM and are never returned after setup.
+- Per-merchant mock or Razorpay Test Mode configuration. Secrets use AES-256-GCM and are never returned after setup; Razorpay webhook secrets can be rotated and are revealed only once.
 - Buyer-bound PurchasePermits with passkey approval, deterministic policy checks, one unique payment claim, replay prevention, and reconciliation-required failure handling.
 - Merchant-specific raw-body Razorpay webhooks, HMAC verification, and per-merchant event deduplication.
 - OAuth 2.1 authorization code + S256 PKCE for ChatGPT MCP, 15-minute access tokens, rotating 30-day refresh tokens, and reuse-family revocation.
@@ -28,7 +28,7 @@ The checked-in build has been verified with:
 
 - TypeScript project-reference type checking.
 - Production builds for the shared core, Express server, and React frontend.
-- Eighteen automated policy, cryptography, OAuth, PostgreSQL, concurrency, tenant-isolation, Shopify, and audit-integrity tests.
+- Twenty-two automated policy, cryptography, OAuth, PostgreSQL, concurrency, tenant-isolation, Shopify, payment-adapter evidence, webhook-rotation, and audit-integrity tests.
 - A production dependency audit with zero known runtime vulnerabilities.
 - An OrbStack Compose build and health check with both PostgreSQL and SpendSeal reporting healthy.
 - An unauthenticated MCP probe returning `401 Unauthorized` with the OAuth protected-resource challenge.
@@ -95,7 +95,7 @@ SpendSeal uses Shopify Admin GraphQL as the authoritative source for synchronize
 6. Choose the merchant-stated refund default. Shopify supplies product facts but does not guarantee refund fulfilment.
 7. Click **Encrypt token, verify store, and sync**. Each Shopify variant becomes a separately purchasable SpendSeal product with an immutable revision.
 
-For the bait-and-switch demonstration, create a PurchasePermit, change the selected variant price in Shopify, then click **Sync Shopify now**. SpendSeal records the new authoritative revision and deterministically rejects execution when the changed terms violate the mandate.
+For the bait-and-switch demonstration, create and approve a PurchasePermit, then change the selected variant price in Shopify and prepare checkout. SpendSeal automatically re-fetches that exact Shopify variant, records the observed revision, and deterministically rejects execution when the changed terms violate the mandate. **Sync Shopify now** remains available only to refresh the dashboard catalog early; it is not part of the security check.
 
 This local Buildathon connector intentionally uses an admin-created custom app to avoid requiring a deployed OAuth callback during development. A public multi-store SaaS version should use Shopify app OAuth instead.
 
@@ -152,6 +152,8 @@ The command creates NovaDesk, three sample plans, and a merchant-isolated mock p
    `https://your-spendseal-host/api/webhooks/razorpay/{merchantId}`
 
 5. Subscribe to `payment.captured` and relevant failure events.
+
+If a webhook secret is exposed, use **Rotate webhook secret** in the owner payment panel, then immediately replace the secret on the matching Razorpay Test Mode webhook. The webhook secret is separate from the Razorpay API Key Secret. Do not place either value in screenshots, chat, recordings, source control, or browser logs. Razorpay may retry older webhook deliveries with the previous secret, but an emergency exposure rotation intentionally stops trusting that old secret.
 
 Live keys are rejected. Every order records the payment-configuration version that made the provider request. Never paste Razorpay secrets into ChatGPT, frontend code, source control, or logs.
 
@@ -234,7 +236,14 @@ evals                 ChatGPT MCP prompt evaluation material
 
 Included: Razorpay Test Mode, local zero-cost deployment, merchant-managed catalogs, multi-user/multi-merchant tenancy, product revisions, OAuth-bound MCP, passkeys, deterministic authorization, replay prevention, webhook verification, and tamper-evident audit evidence.
 
-Out of scope: live money, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, fulfilment, password recovery/email delivery, Shopify write access or automatic webhooks, other third-party store synchronization, and externally anchored audit storage.
+Out of scope: live money, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, fulfilment, password recovery/email delivery, Shopify write access or automatic catalog webhooks, arbitrary-site payment submission, card/CVV/OTP storage or entry, and externally anchored audit storage.
+
+### About “buy from any website”
+
+SpendSeal does not currently claim it can autonomously buy from every website. A generic page scrape is not merchant-authoritative, and arbitrary checkout automation is brittle around logins, CAPTCHA, delivery details, 3-D Secure, and OTPs. The safe product direction is two explicit trust levels:
+
+- **Verified merchant execution:** connected Shopify or merchant APIs provide authoritative product evidence; SpendSeal can enforce the mandate and create a Razorpay Test Mode order.
+- **Universal browser assist (planned):** SpendSeal may observe a public product page, hash the observed offer, collect passkey approval, re-check the page immediately before handoff, and block changed terms. The buyer must complete login, address, card, CVV, OTP, CAPTCHA, and the final payment action on the merchant site. Observed web data must never be described as independently verified merchant truth.
 
 ## License
 

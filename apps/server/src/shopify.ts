@@ -62,22 +62,31 @@ export class ShopifyAdminClient {
           }
         }
       `, { cursor });
-      for (const variant of data.productVariants.nodes) {
-        const suffix = variant.id.split("/").at(-1) ?? variant.id;
-        items.push({
-          externalId: variant.id,
-          sku: `SHOPIFY-${suffix}`,
-          name: variant.title === "Default Title" ? variant.product.title : `${variant.product.title} · ${variant.title}`,
-          description: variant.product.description ?? "",
-          pricePaise: decimalToPaise(variant.price),
-          active: variant.product.status === "ACTIVE" && variant.availableForSale,
-          externalUpdatedAt: new Date(variant.updatedAt > variant.product.updatedAt ? variant.updatedAt : variant.product.updatedAt).toISOString(),
-        });
-      }
+      for (const variant of data.productVariants.nodes) items.push(mapVariant(variant));
       if (items.length > 5_000) throw new ShopifyError("SHOPIFY_CATALOG_TOO_LARGE", "The first release supports at most 5,000 Shopify variants per merchant.");
       cursor = data.productVariants.pageInfo.hasNextPage ? data.productVariants.pageInfo.endCursor : null;
     } while (cursor);
     return items;
+  }
+
+  async productVariant(externalId: string): Promise<ShopifyCatalogItem | null> {
+    if (!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(externalId)) throw new ShopifyError("SHOPIFY_PRODUCT_REFERENCE_INVALID", "The stored Shopify variant reference is invalid.");
+    const data = await this.query<{
+      node: {
+        id: string; title: string; sku: string | null; price: string; updatedAt: string; availableForSale: boolean;
+        product: { id: string; title: string; description: string; status: string; updatedAt: string };
+      } | null;
+    }>(`
+      query SpendSealProductVariant($id: ID!) {
+        node(id: $id) {
+          ... on ProductVariant {
+            id title sku price updatedAt availableForSale
+            product { id title description status updatedAt }
+          }
+        }
+      }
+    `, { id: externalId });
+    return data.node ? mapVariant(data.node) : null;
   }
 
   private async query<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
@@ -98,6 +107,22 @@ export class ShopifyAdminClient {
     if (body.errors?.length || !body.data) throw new ShopifyError("SHOPIFY_GRAPHQL_ERROR", body.errors?.[0]?.message ?? "Shopify returned an invalid response.");
     return body.data;
   }
+}
+
+function mapVariant(variant: {
+  id: string; title: string; sku: string | null; price: string; updatedAt: string; availableForSale: boolean;
+  product: { id: string; title: string; description: string; status: string; updatedAt: string };
+}): ShopifyCatalogItem {
+  const suffix = variant.id.split("/").at(-1) ?? variant.id;
+  return {
+    externalId: variant.id,
+    sku: variant.sku?.trim() || `SHOPIFY-${suffix}`,
+    name: variant.title === "Default Title" ? variant.product.title : `${variant.product.title} · ${variant.title}`,
+    description: variant.product.description ?? "",
+    pricePaise: decimalToPaise(variant.price),
+    active: variant.product.status === "ACTIVE" && variant.availableForSale,
+    externalUpdatedAt: new Date(variant.updatedAt > variant.product.updatedAt ? variant.updatedAt : variant.product.updatedAt).toISOString(),
+  };
 }
 
 export class ShopifyError extends Error {

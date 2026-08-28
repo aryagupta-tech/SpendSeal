@@ -21,4 +21,13 @@ describe("Shopify catalog connector", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(responses.shift()), { status: 200, headers: { "content-type": "application/json" } })));
     await expect(new ShopifyAdminClient("agentrail-test-store.myshopify.com", "shpat_test_token_123456").products()).resolves.toEqual([expect.objectContaining({ sku: "SHOPIFY-42", name: "Security Plan", pricePaise: 99995, active: true })]);
   });
+
+  it("re-fetches one exact stored Shopify variant for checkout policy", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { variables: { id: string } };
+      expect(body.variables.id).toBe("gid://shopify/ProductVariant/42");
+      return new Response(JSON.stringify({ data: { node: { id: body.variables.id, title: "Default Title", sku: "PLAN-42", price: "1299.00", updatedAt: "2026-08-28T06:00:00Z", availableForSale: true, product: { id: "gid://shopify/Product/7", title: "Security Plan", description: "Annual access", status: "ACTIVE", updatedAt: "2026-08-28T06:00:00Z" } } } }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    await expect(new ShopifyAdminClient("agentrail-test-store.myshopify.com", "shpat_test_token_123456").productVariant("gid://shopify/ProductVariant/42")).resolves.toMatchObject({ sku: "PLAN-42", pricePaise: 129900, active: true });
+  });
 });
