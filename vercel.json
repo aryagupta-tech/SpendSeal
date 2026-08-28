@@ -3,15 +3,16 @@
   "framework": null,
   "buildCommand": "npm run build:vercel",
   "functions": {
-    "api/[...path].ts": {
+    "api/spendseal.js": {
       "maxDuration": 60,
       "includeFiles": "apps/server/drizzle/**"
     }
   },
   "rewrites": [
-    { "source": "/mcp", "destination": "/api/__spendseal_mcp" },
-    { "source": "/oauth/:path*", "destination": "/api/__spendseal_oauth/:path*" },
-    { "source": "/.well-known/:path*", "destination": "/api/__spendseal_well_known/:path*" },
+    { "source": "/api/:path*", "destination": "/api/spendseal?__spendseal_path=/api/:path*" },
+    { "source": "/mcp", "destination": "/api/spendseal?__spendseal_path=/mcp" },
+    { "source": "/oauth/:path*", "destination": "/api/spendseal?__spendseal_path=/oauth/:path*" },
+    { "source": "/.well-known/:path*", "destination": "/api/spendseal?__spendseal_path=/.well-known/:path*" },
     { "source": "/login", "destination": "/index.html" },
     { "source": "/approve/:path*", "destination": "/index.html" },
     { "source": "/checkout/:path*", "destination": "/index.html" },

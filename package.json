@@ -11,7 +11,7 @@
     "predev": "npm run build -w @spendseal/core && npm run build -w @spendseal/server",
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @spendseal/server\" \"npm run dev -w @spendseal/web\"",
     "build": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run build -w @spendseal/web",
-    "build:vercel": "npm run build && node scripts/prepare-vercel.mjs",
+    "build:vercel": "npm run build && npm exec -- tsup index.ts --format esm --platform node --target node22 --out-dir .vercel-build --external pg-native --no-splitting && node scripts/prepare-vercel.mjs",
     "db:migrate": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run migrate -w @spendseal/server",
     "demo:seed": "npm run build -w @spendseal/core && npm run build -w @spendseal/server && npm run seed -w @spendseal/server",
     "typecheck": "tsc -b && npm run typecheck:vercel",
