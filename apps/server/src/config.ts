@@ -19,7 +19,8 @@ export type Config = {
 };
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
-  const publicBaseUrl = overrides.publicBaseUrl ?? process.env.PUBLIC_BASE_URL ?? "http://localhost:43117";
+  const defaultBaseUrl = process.env.VERCEL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL ?? "spendseal.vercel.app"}` : "http://localhost:43117";
+  const publicBaseUrl = overrides.publicBaseUrl ?? process.env.PUBLIC_BASE_URL ?? defaultBaseUrl;
   const webauthnOrigin = overrides.webauthnOrigin ?? process.env.WEBAUTHN_ORIGIN ?? publicBaseUrl;
   const key = encryptionKey(process.env.CREDENTIAL_ENCRYPTION_KEY);
   return {
