@@ -22,6 +22,8 @@ export type StoredPasskey = { id: string; userId: string; rpId: string; publicKe
 export type StoredChallenge = { id: string; userId: string | null; purchasePermitId: string | null; purpose: string; challenge: string; context: Record<string, unknown> };
 export type PaymentConfiguration = { merchantId: string; adapter: "mock" | "razorpay"; keyId: string | null; keySecretCiphertext: string | null; webhookSecretCiphertext: string | null; encryptionKeyVersion: number; version: number };
 export type CatalogConnection = { merchantId: string; provider: "shopify"; shopDomain: string; accessTokenCiphertext: string; encryptionKeyVersion: number; status: "active" | "error" | "revoked"; shopName: string; currency: string; defaultRefundable: boolean; defaultRefundWindowDays: number; lastSyncAt: string | null };
+export type MerchantRole = "owner" | "admin" | "catalog_manager" | "auditor";
+export type MerchantListing = Merchant & { role?: MerchantRole };
 
 export class SpendSealStore {
   constructor(readonly pool: Pool) {}
@@ -107,16 +109,18 @@ export class SpendSealStore {
     });
   }
 
-  async listMerchants(input: { query?: string; userId?: string; limit?: number; cursor?: string }): Promise<{ merchants: Merchant[]; nextCursor: string | null }> {
+  async listMerchants(input: { query?: string; userId?: string; limit?: number; cursor?: string }): Promise<{ merchants: MerchantListing[]; nextCursor: string | null }> {
     const values: unknown[] = [];
     const where: string[] = ["m.status='active'"];
     if (input.query) { values.push(`%${input.query}%`); where.push(`(m.display_name ILIKE $${values.length} OR m.slug ILIKE $${values.length})`); }
-    if (input.userId) { values.push(input.userId); where.push(`EXISTS(SELECT 1 FROM merchant_memberships mm WHERE mm.merchant_id=m.id AND mm.user_id=$${values.length})`); }
+    let membershipParameter: number | null = null;
+    if (input.userId) { values.push(input.userId); membershipParameter = values.length; where.push(`EXISTS(SELECT 1 FROM merchant_memberships mm WHERE mm.merchant_id=m.id AND mm.user_id=$${values.length})`); }
     if (input.cursor) { values.push(input.cursor); where.push(`m.id::text>$${values.length}`); }
     const limit = Math.min(input.limit ?? 50, 100); values.push(limit + 1);
-    const result = await this.pool.query(`SELECT m.* FROM merchants m WHERE ${where.join(" AND ")} ORDER BY m.id LIMIT $${values.length}`, values);
+    const roleSelection = membershipParameter ? `(SELECT mm.role FROM merchant_memberships mm WHERE mm.merchant_id=m.id AND mm.user_id=$${membershipParameter}) AS membership_role` : `NULL::text AS membership_role`;
+    const result = await this.pool.query(`SELECT m.*,${roleSelection} FROM merchants m WHERE ${where.join(" AND ")} ORDER BY m.id LIMIT $${values.length}`, values);
     const rows = result.rows.slice(0, limit);
-    return { merchants: rows.map(mapMerchant), nextCursor: result.rows.length > limit ? rows.at(-1)!.id : null };
+    return { merchants: rows.map((row) => ({ ...mapMerchant(row), ...(row.membership_role ? { role: row.membership_role as MerchantRole } : {}) })), nextCursor: result.rows.length > limit ? rows.at(-1)!.id : null };
   }
 
   async getMerchant(id: string): Promise<Merchant | null> { const result = await this.pool.query("SELECT * FROM merchants WHERE id=$1", [id]); return result.rows[0] ? mapMerchant(result.rows[0]) : null; }
