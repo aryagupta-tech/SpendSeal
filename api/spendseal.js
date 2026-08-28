@@ -1,4 +1,5 @@
-import handler from "../.vercel-build/index.js";
+import bundle from "../.vercel-build/index.cjs";
+const handler = bundle.default ?? bundle;
 
 export default async function vercelRoute(req, res) {
   const url = new URL(req.url ?? "/", "http://spendseal.internal");
