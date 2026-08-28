@@ -11,6 +11,7 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 - PostgreSQL 16 with explicit migrations and tenant-safe composite catalog references.
 - Passkey registration/login, opaque hashed sessions, HttpOnly cookies, CSRF protection, idle and absolute expiry.
 - Merchants, role memberships, one-time invitations, product CRUD, optimistic concurrency, archival, and immutable revisions.
+- Shopify Admin GraphQL catalog connection with encrypted store tokens, `read_products` scope verification, INR validation, variant synchronization, immutable revisions, and authoritative-source evidence.
 - Merchant API keys with `ar_test_` prefix, scopes, hashes, expiry, last-use tracking, rotation-ready creation, and revocation.
 - Per-merchant mock or Razorpay Test Mode configuration. Secrets use AES-256-GCM and are never returned after setup.
 - Buyer-bound IntentLocks with passkey approval, deterministic policy checks, one unique payment claim, replay prevention, and reconciliation-required failure handling.
@@ -55,7 +56,7 @@ Requirements: OrbStack with Docker Compose support.
    docker compose ps
    ```
 
-4. Open `http://localhost:43118`, create an account with a passkey, create a merchant, publish a product, and connect the deterministic mock adapter or a Razorpay Test account. OrbStack uses host port 43118 so it can coexist with the Vite/API development ports.
+4. Open `http://localhost:43118`, create an account with a passkey, create a merchant, connect Shopify or publish a product manually, and connect the deterministic mock adapter or a Razorpay Test account. OrbStack uses host port 43118 so it can coexist with the Vite/API development ports.
 
 5. Follow logs or stop safely:
 
@@ -72,7 +73,7 @@ The app process applies verified SQL migrations before listening. `/api/v1/healt
 
 1. Register an AgentRail account with a device passkey.
 2. Create your merchant trust domain.
-3. Publish at least one product with a SKU, INR price, availability, and merchant-stated refund terms.
+3. Connect a Shopify development store and synchronize its real catalog, or publish a product manually.
 4. Connect the deterministic mock adapter for a zero-cost demo, or connect that merchant’s Razorpay Test account.
 5. Select the product in the buyer view and set the maximum spend, refund requirement, price-change policy, and expiry.
 6. Create the IntentLock and open its one-time approval URL.
@@ -81,6 +82,22 @@ The app process applies verified SQL migrations before listening. `/api/v1/healt
 9. Open the IntentLock audit explorer and verify its SHA-256 hash-linked chain.
 
 The merchant controls authoritative product facts. The buyer controls authorization constraints. Neither ChatGPT nor an approval URL can approve the payment.
+
+## Connect a Shopify development store
+
+AgentRail uses Shopify Admin GraphQL as the authoritative source for synchronized prices and availability. Shopify access tokens are encrypted with the same versioned AES-256-GCM credential vault as payment secrets and are never returned after setup.
+
+1. In Shopify Admin, open **Settings → Apps and sales channels → Develop apps**.
+2. Create a custom app named `AgentRail Catalog Reader`.
+3. Configure Admin API scopes and grant only `read_products`.
+4. Install the app and copy its Admin API access token. Shopify displays this token only once.
+5. In AgentRail, create or select your merchant. In **Connect your Shopify development store**, enter the permanent domain such as `agentrail-test-store.myshopify.com` and the token. Do not paste the token into ChatGPT.
+6. Choose the merchant-stated refund default. Shopify supplies product facts but does not guarantee refund fulfilment.
+7. Click **Encrypt token, verify store, and sync**. Each Shopify variant becomes a separately purchasable AgentRail product with an immutable revision.
+
+For the bait-and-switch demonstration, create an IntentLock, change the selected variant price in Shopify, then click **Sync Shopify now**. AgentRail records the new authoritative revision and deterministically rejects execution when the changed terms violate the mandate.
+
+This local Buildathon connector intentionally uses an admin-created custom app to avoid requiring a deployed OAuth callback during development. A public multi-store SaaS version should use Shopify app OAuth instead.
 
 ## Run locally with Node
 
@@ -128,7 +145,7 @@ The command creates NovaDesk, three sample plans, and a merchant-isolated mock p
 ## Razorpay Test Mode per merchant
 
 1. In Razorpay Dashboard, switch to Test Mode and generate a key beginning with `rzp_test_`.
-2. In the selected merchant’s AgentRail payment panel, enter the Test Key ID and Key Secret.
+2. If `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` are already in the local `.env`, click **Use Test keys already in .env**. Otherwise, enter them in the selected merchant’s AgentRail payment panel.
 3. Copy the generated webhook secret immediately; it is shown once.
 4. In Razorpay, configure the displayed merchant-specific URL:
 
@@ -189,6 +206,7 @@ flowchart LR
   GPT[ChatGPT] -->|OAuth buyer + MCP| MCP[AgentRail MCP]
   Browser[Buyer browser] -->|Passkey + CSRF session| API[AgentRail REST API]
   Merchant[Merchant member] -->|Catalog + Test credentials| API
+  Shopify[Shopify Admin GraphQL] -->|read-only catalog sync| API
   MCP --> Lock[Buyer-bound IntentLock]
   API --> Lock
   Lock --> Policy[Deterministic policy engine]
@@ -216,7 +234,7 @@ evals                 ChatGPT MCP prompt evaluation material
 
 Included: Razorpay Test Mode, local zero-cost deployment, merchant-managed catalogs, multi-user/multi-merchant tenancy, product revisions, OAuth-bound MCP, passkeys, deterministic authorization, replay prevention, webhook verification, and tamper-evident audit evidence.
 
-Out of scope: live money, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, fulfilment, password recovery/email delivery, third-party store synchronization, and externally anchored audit storage.
+Out of scope: live money, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, fulfilment, password recovery/email delivery, Shopify write access or automatic webhooks, other third-party store synchronization, and externally anchored audit storage.
 
 ## License
 

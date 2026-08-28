@@ -3,7 +3,8 @@ import { CreateIntentInputSchema, evaluateIntentLock, type CreateIntentInput, ty
 import type { Config } from "./config.js";
 import { CredentialVault } from "./credentials.js";
 import { AmbiguousPaymentError, MockPaymentAdapter, RazorpayPaymentAdapter, type PaymentAdapter } from "./payments.js";
-import { AgentRailStore, type PaymentConfiguration } from "./store.js";
+import { AgentRailStore, type CatalogConnection, type PaymentConfiguration } from "./store.js";
+import { ShopifyAdminClient, ShopifyError } from "./shopify.js";
 
 export class AgentRailService {
   readonly vault: CredentialVault;
@@ -98,11 +99,41 @@ export class AgentRailService {
     return { configuration: { adapter: saved.adapter, keyId: saved.keyId, version: saved.version }, ...(webhookSecret ? { webhookSecret } : {}) };
   }
 
+  async configureShopify(merchantId: string, userId: string, input: { shopDomain: string; accessToken: string; defaultRefundable: boolean; defaultRefundWindowDays: number }) {
+    try {
+      const client = new ShopifyAdminClient(input.shopDomain, input.accessToken);
+      const verified = await client.verify();
+      const connection = await this.store.saveShopifyConnection({ merchantId, provider: "shopify", shopDomain: verified.shopDomain, accessTokenCiphertext: this.vault.encrypt(input.accessToken), encryptionKeyVersion: this.vault.version, shopName: verified.shopName, currency: verified.currency, defaultRefundable: input.defaultRefundable, defaultRefundWindowDays: input.defaultRefundable ? input.defaultRefundWindowDays : 0 });
+      const sync = await this.syncShopify(merchantId, userId);
+      return { connection: safeCatalogConnection(connection), sync };
+    } catch (error) { throw shopifyAgentRailError(error); }
+  }
+
+  async syncShopify(merchantId: string, userId: string) {
+    const connection = await this.store.catalogConnection(merchantId);
+    if (!connection || connection.provider !== "shopify") throw new AgentRailError(404, "SHOPIFY_NOT_CONNECTED", "Connect a Shopify store before synchronizing products.");
+    try {
+      const client = new ShopifyAdminClient(connection.shopDomain, this.vault.decrypt(connection.accessTokenCiphertext));
+      await client.verify();
+      return await this.store.syncShopifyProducts(userId, connection, await client.products());
+    } catch (error) { throw shopifyAgentRailError(error); }
+  }
+
   adapter(config: PaymentConfiguration): PaymentAdapter {
     if (config.adapter === "mock") return new MockPaymentAdapter();
     if (!config.keyId || !config.keySecretCiphertext) throw new AgentRailError(409, "PAYMENT_CONFIG_MISSING", "Merchant payment credentials are incomplete.");
     return new RazorpayPaymentAdapter(config.keyId, this.vault.decrypt(config.keySecretCiphertext));
   }
+}
+
+function safeCatalogConnection(connection: CatalogConnection) {
+  return { provider: connection.provider, shopDomain: connection.shopDomain, shopName: connection.shopName, currency: connection.currency, status: connection.status, defaultRefundable: connection.defaultRefundable, defaultRefundWindowDays: connection.defaultRefundWindowDays, lastSyncAt: connection.lastSyncAt, connected: true };
+}
+
+function shopifyAgentRailError(error: unknown): AgentRailError {
+  if (error instanceof ShopifyError) return new AgentRailError(error.code === "SHOPIFY_UNREACHABLE" || error.code === "SHOPIFY_REQUEST_FAILED" ? 502 : 400, error.code, error.message);
+  if (error instanceof AgentRailError) return error;
+  return new AgentRailError(502, "SHOPIFY_REQUEST_FAILED", "Shopify synchronization failed safely.");
 }
 
 export class AgentRailError extends Error {

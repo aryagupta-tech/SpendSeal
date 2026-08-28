@@ -14,6 +14,8 @@ export type Config = {
   demoMode: boolean;
   sessionIdleMinutes: number;
   sessionAbsoluteHours: number;
+  localRazorpayKeyId: string | null;
+  localRazorpayKeySecret: string | null;
 };
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -34,6 +36,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     demoMode: process.env.DEMO_MODE === "true",
     sessionIdleMinutes: Number(process.env.SESSION_IDLE_MINUTES ?? 30),
     sessionAbsoluteHours: Number(process.env.SESSION_ABSOLUTE_HOURS ?? 8),
+    localRazorpayKeyId: process.env.RAZORPAY_KEY_ID?.startsWith("rzp_test_") ? process.env.RAZORPAY_KEY_ID : null,
+    localRazorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || null,
     ...overrides,
   };
 }

@@ -15,7 +15,12 @@ export type User = z.infer<typeof UserSchema>;
 export const MerchantSchema = z.object({ id: z.string().uuid(), slug: z.string().min(2), displayName: z.string().min(1), status: z.enum(["active", "suspended"]), createdAt: z.string().datetime(), updatedAt: z.string().datetime() });
 export type Merchant = z.infer<typeof MerchantSchema>;
 
-export const CatalogAuthoritySchema = z.object({ type: z.literal("merchant_managed_catalog"), merchantId: z.string().uuid(), source: z.literal("agentrail_server") });
+export const CatalogAuthoritySchema = z.object({
+  type: z.literal("merchant_managed_catalog"),
+  merchantId: z.string().uuid(),
+  source: z.enum(["agentrail_server", "shopify_admin_graphql"]),
+  shopDomain: z.string().nullable().optional(),
+});
 export type CatalogAuthority = z.infer<typeof CatalogAuthoritySchema>;
 
 export const ProductSchema = z.object({

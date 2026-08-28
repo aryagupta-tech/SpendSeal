@@ -43,6 +43,18 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect(await store.productRevisions(merchant.id, product.id)).toHaveLength(2);
   });
 
+  it("synchronizes Shopify variants as immutable authoritative revisions", async () => {
+    const owner = await user("shopify-owner"); const merchant = await store.createMerchant(owner.id, { slug: "shopify-store", displayName: "Shopify Store" });
+    const connection = await store.saveShopifyConnection({ merchantId: merchant.id, provider: "shopify", shopDomain: "agentrail-test-store.myshopify.com", accessTokenCiphertext: "encrypted-test-token", encryptionKeyVersion: 1, shopName: "AgentRail Test Store", currency: "INR", defaultRefundable: true, defaultRefundWindowDays: 7 });
+    const base = { externalId: "gid://shopify/ProductVariant/42", sku: "SHOPIFY-42", name: "Annual Plan", description: "Real Shopify variant", active: true, externalUpdatedAt: "2026-08-28T05:00:00.000Z" };
+    expect((await store.syncShopifyProducts(owner.id, connection, [{ ...base, pricePaise: 99_900 }])).created).toBe(1);
+    const first = (await store.listProducts(merchant.id)).products[0]!; expect(first.catalogAuthority).toMatchObject({ source: "shopify_admin_graphql", shopDomain: "agentrail-test-store.myshopify.com" }); expect(first.version).toBe(1);
+    expect((await store.syncShopifyProducts(owner.id, connection, [{ ...base, pricePaise: 129_900, externalUpdatedAt: "2026-08-28T06:00:00.000Z" }])).updated).toBe(1);
+    const second = await store.getProduct(merchant.id, first.id); expect(second?.version).toBe(2); expect(second?.snapshotHash).not.toBe(first.snapshotHash);
+    expect((await store.syncShopifyProducts(owner.id, connection, [])).archived).toBe(1);
+    const archived = await store.getProduct(merchant.id, first.id); expect(archived?.active).toBe(false); expect(archived?.version).toBe(3); expect(await store.productRevisions(merchant.id, first.id)).toHaveLength(3);
+  });
+
   it("blocks post-intent price bait-and-switch with observed revision evidence", async () => {
     const setup = await approvedIntent(); await store.updateProduct(setup.owner.id, setup.merchant.id, setup.product.id, 1, { pricePaise: 129_900 });
     const result = await service.prepareCheckout(setup.buyer.id, setup.intent.id);

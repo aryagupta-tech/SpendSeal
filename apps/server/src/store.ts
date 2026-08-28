@@ -13,6 +13,7 @@ import {
   type User,
 } from "@agentrail/core";
 import { transaction } from "./db/client.js";
+import type { ShopifyCatalogItem } from "./shopify.js";
 
 type Queryable = { query<R extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<QueryResult<R>> };
 
@@ -20,6 +21,7 @@ export type SessionPrincipal = { user: User; csrfHash: string; tokenHash: string
 export type StoredPasskey = { id: string; userId: string; rpId: string; publicKey: Uint8Array; counter: number; deviceType: string; backedUp: boolean; transports: string[] };
 export type StoredChallenge = { id: string; userId: string | null; intentLockId: string | null; purpose: string; challenge: string; context: Record<string, unknown> };
 export type PaymentConfiguration = { merchantId: string; adapter: "mock" | "razorpay"; keyId: string | null; keySecretCiphertext: string | null; webhookSecretCiphertext: string | null; encryptionKeyVersion: number; version: number };
+export type CatalogConnection = { merchantId: string; provider: "shopify"; shopDomain: string; accessTokenCiphertext: string; encryptionKeyVersion: number; status: "active" | "error" | "revoked"; shopName: string; currency: string; defaultRefundable: boolean; defaultRefundWindowDays: number; lastSyncAt: string | null };
 
 export class AgentRailStore {
   constructor(readonly pool: Pool) {}
@@ -119,6 +121,63 @@ export class AgentRailStore {
 
   async getMerchant(id: string): Promise<Merchant | null> { const result = await this.pool.query("SELECT * FROM merchants WHERE id=$1", [id]); return result.rows[0] ? mapMerchant(result.rows[0]) : null; }
 
+  async catalogConnection(merchantId: string): Promise<CatalogConnection | null> {
+    const result = await this.pool.query("SELECT * FROM merchant_catalog_connections WHERE merchant_id=$1", [merchantId]);
+    return result.rows[0] ? mapCatalogConnection(result.rows[0]) : null;
+  }
+
+  async saveShopifyConnection(input: Omit<CatalogConnection, "status" | "lastSyncAt">): Promise<CatalogConnection> {
+    return transaction(this.pool, async (client) => {
+      const result = await client.query(`INSERT INTO merchant_catalog_connections(merchant_id,provider,shop_domain,access_token_ciphertext,encryption_key_version,status,shop_name,currency,default_refundable,default_refund_window_days)
+        VALUES($1,'shopify',$2,$3,$4,'active',$5,$6,$7,$8)
+        ON CONFLICT(merchant_id) DO UPDATE SET shop_domain=EXCLUDED.shop_domain,access_token_ciphertext=EXCLUDED.access_token_ciphertext,encryption_key_version=EXCLUDED.encryption_key_version,status='active',shop_name=EXCLUDED.shop_name,currency=EXCLUDED.currency,default_refundable=EXCLUDED.default_refundable,default_refund_window_days=EXCLUDED.default_refund_window_days,updated_at=now()
+        RETURNING *`, [input.merchantId, input.shopDomain, input.accessTokenCiphertext, input.encryptionKeyVersion, input.shopName, input.currency, input.defaultRefundable, input.defaultRefundWindowDays]);
+      await this.appendAudit({ scopeType: "merchant", scopeId: input.merchantId, merchantId: input.merchantId, intentLockId: null, eventType: "SHOPIFY_CATALOG_CONNECTED", actor: "merchant", reasonCode: null, payload: { provider: "shopify", shopDomain: input.shopDomain, shopName: input.shopName, currency: input.currency, scopes: ["read_products"], tokenStored: "aes-256-gcm" } }, client);
+      return mapCatalogConnection(result.rows[0]);
+    });
+  }
+
+  async syncShopifyProducts(userId: string, connection: CatalogConnection, items: ShopifyCatalogItem[]): Promise<{ created: number; updated: number; unchanged: number; archived: number; syncedAt: string }> {
+    return transaction(this.pool, async (client) => {
+      const syncedAt = new Date().toISOString(); let created = 0; let updated = 0; let unchanged = 0;
+      const observedIds = items.map((item) => item.externalId);
+      for (const item of items) {
+        const existing = await client.query("SELECT * FROM products WHERE merchant_id=$1 AND external_id=$2 FOR UPDATE", [connection.merchantId, item.externalId]);
+        const row = existing.rows[0];
+        if (!row) {
+          const id = randomUUID(); const revisionId = randomUUID();
+          const snapshot = productSnapshot({ id, merchantId: connection.merchantId, sku: item.sku, name: item.name, description: item.description, pricePaise: item.pricePaise, refundable: connection.defaultRefundable, refundWindowDays: connection.defaultRefundWindowDays, active: item.active, version: 1, revisionId, catalogSource: "shopify_admin_graphql", shopDomain: connection.shopDomain, externalId: item.externalId, externalUpdatedAt: item.externalUpdatedAt });
+          const snapshotHash = sha256(snapshot);
+          await client.query(`INSERT INTO products(id,merchant_id,sku,name,description,price_paise,refundable,refund_window_days,active,version,current_revision_id,catalog_source,external_id,external_updated_at,created_at,updated_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,'shopify_admin_graphql',$11,$12,$13,$13)`, [id, connection.merchantId, item.sku, item.name, item.description, item.pricePaise, connection.defaultRefundable, connection.defaultRefundWindowDays, item.active, revisionId, item.externalId, item.externalUpdatedAt, syncedAt]);
+          await client.query("INSERT INTO product_revisions(id,merchant_id,product_id,version,snapshot_json,snapshot_hash,created_by,created_at) VALUES($1,$2,$3,1,$4,$5,$6,$7)", [revisionId, connection.merchantId, id, snapshot, snapshotHash, userId, syncedAt]);
+          created += 1; continue;
+        }
+        const changed = row.sku !== item.sku || row.name !== item.name || row.description !== item.description || row.price_paise !== item.pricePaise || row.active !== item.active || row.refundable !== connection.defaultRefundable || row.refund_window_days !== connection.defaultRefundWindowDays;
+        if (!changed) { await client.query("UPDATE products SET external_updated_at=$3,updated_at=$4 WHERE merchant_id=$1 AND id=$2", [connection.merchantId, row.id, item.externalUpdatedAt, syncedAt]); unchanged += 1; continue; }
+        const version = row.version + 1; const revisionId = randomUUID();
+        const snapshot = productSnapshot({ id: row.id, merchantId: connection.merchantId, sku: item.sku, name: item.name, description: item.description, pricePaise: item.pricePaise, refundable: connection.defaultRefundable, refundWindowDays: connection.defaultRefundWindowDays, active: item.active, version, revisionId, catalogSource: "shopify_admin_graphql", shopDomain: connection.shopDomain, externalId: item.externalId, externalUpdatedAt: item.externalUpdatedAt });
+        const snapshotHash = sha256(snapshot);
+        await client.query("INSERT INTO product_revisions(id,merchant_id,product_id,version,snapshot_json,snapshot_hash,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [revisionId, connection.merchantId, row.id, version, snapshot, snapshotHash, userId, syncedAt]);
+        await client.query(`UPDATE products SET sku=$3,name=$4,description=$5,price_paise=$6,refundable=$7,refund_window_days=$8,active=$9,version=$10,current_revision_id=$11,external_updated_at=$12,updated_at=$13 WHERE merchant_id=$1 AND id=$2`, [connection.merchantId, row.id, item.sku, item.name, item.description, item.pricePaise, connection.defaultRefundable, connection.defaultRefundWindowDays, item.active, version, revisionId, item.externalUpdatedAt, syncedAt]);
+        updated += 1;
+      }
+      const stale = observedIds.length
+        ? await client.query("SELECT * FROM products WHERE merchant_id=$1 AND catalog_source='shopify_admin_graphql' AND active=true AND NOT(external_id=ANY($2::text[])) FOR UPDATE", [connection.merchantId, observedIds])
+        : await client.query("SELECT * FROM products WHERE merchant_id=$1 AND catalog_source='shopify_admin_graphql' AND active=true FOR UPDATE", [connection.merchantId]);
+      for (const row of stale.rows) {
+        const version = row.version + 1; const revisionId = randomUUID();
+        const snapshot = productSnapshot({ id: row.id, merchantId: connection.merchantId, sku: row.sku, name: row.name, description: row.description, pricePaise: row.price_paise, refundable: row.refundable, refundWindowDays: row.refund_window_days, active: false, version, revisionId, catalogSource: "shopify_admin_graphql", shopDomain: connection.shopDomain, externalId: row.external_id, externalUpdatedAt: row.external_updated_at ? iso(row.external_updated_at) : null });
+        await client.query("INSERT INTO product_revisions(id,merchant_id,product_id,version,snapshot_json,snapshot_hash,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [revisionId, connection.merchantId, row.id, version, snapshot, sha256(snapshot), userId, syncedAt]);
+        await client.query("UPDATE products SET active=false,version=$3,current_revision_id=$4,updated_at=$5 WHERE merchant_id=$1 AND id=$2", [connection.merchantId, row.id, version, revisionId, syncedAt]);
+      }
+      const archived = stale.rowCount ?? 0;
+      await client.query("UPDATE merchant_catalog_connections SET last_sync_at=$2,status='active',updated_at=$2 WHERE merchant_id=$1", [connection.merchantId, syncedAt]);
+      await this.appendAudit({ scopeType: "merchant", scopeId: connection.merchantId, merchantId: connection.merchantId, intentLockId: null, eventType: "SHOPIFY_CATALOG_SYNCED", actor: "merchant", reasonCode: null, payload: { shopDomain: connection.shopDomain, observedVariants: items.length, created, updated, unchanged, archived, syncedAt } }, client);
+      return { created, updated, unchanged, archived, syncedAt };
+    });
+  }
+
   async requireMembership(userId: string, merchantId: string, roles?: string[]): Promise<string | null> {
     const result = await this.pool.query("SELECT role FROM merchant_memberships WHERE user_id=$1 AND merchant_id=$2", [userId, merchantId]);
     const role = result.rows[0]?.role as string | undefined;
@@ -174,7 +233,7 @@ export class AgentRailStore {
   async createProduct(userId: string, merchantId: string, input: { sku: string; name: string; description: string; pricePaise: number; refundable: boolean; refundWindowDays: number; active?: boolean }): Promise<Product> {
     return transaction(this.pool, async (client) => {
       const id = randomUUID(); const revisionId = randomUUID(); const now = new Date().toISOString();
-      const snapshot = productSnapshot({ id, merchantId, sku: input.sku, name: input.name, description: input.description, pricePaise: input.pricePaise, refundable: input.refundable, refundWindowDays: input.refundWindowDays, active: input.active ?? true, version: 1, revisionId });
+      const snapshot = productSnapshot({ id, merchantId, sku: input.sku, name: input.name, description: input.description, pricePaise: input.pricePaise, refundable: input.refundable, refundWindowDays: input.refundWindowDays, active: input.active ?? true, version: 1, revisionId, catalogSource: "agentrail_server", shopDomain: null, externalId: null, externalUpdatedAt: null });
       const snapshotHash = sha256(snapshot);
       await client.query(`INSERT INTO products(id,merchant_id,sku,name,description,price_paise,refundable,refund_window_days,active,version,current_revision_id,created_at,updated_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,$11)`, [id, merchantId, input.sku, input.name, input.description, input.pricePaise, input.refundable, input.refundWindowDays, input.active ?? true, revisionId, now]);
@@ -188,10 +247,10 @@ export class AgentRailStore {
   async updateProduct(userId: string, merchantId: string, productId: string, expectedVersion: number, fields: Partial<{ sku: string; name: string; description: string; pricePaise: number; refundable: boolean; refundWindowDays: number; active: boolean }>): Promise<Product | "VERSION_CONFLICT" | null> {
     return transaction(this.pool, async (client) => {
       const locked = await client.query("SELECT * FROM products WHERE merchant_id=$1 AND id=$2 FOR UPDATE", [merchantId, productId]);
-      const row = locked.rows[0]; if (!row) return null; if (row.version !== expectedVersion) return "VERSION_CONFLICT";
+      const row = locked.rows[0]; if (!row) return null; if (row.catalog_source === "shopify_admin_graphql") throw new Error("EXTERNAL_SOURCE"); if (row.version !== expectedVersion) return "VERSION_CONFLICT";
       const version = row.version + 1; const revisionId = randomUUID(); const now = new Date().toISOString();
       const next = { sku: fields.sku ?? row.sku, name: fields.name ?? row.name, description: fields.description ?? row.description, pricePaise: fields.pricePaise ?? row.price_paise, refundable: fields.refundable ?? row.refundable, refundWindowDays: fields.refundWindowDays ?? row.refund_window_days, active: fields.active ?? row.active };
-      const snapshot = productSnapshot({ id: productId, merchantId, ...next, version, revisionId }); const snapshotHash = sha256(snapshot);
+      const snapshot = productSnapshot({ id: productId, merchantId, ...next, version, revisionId, catalogSource: "agentrail_server", shopDomain: null, externalId: null, externalUpdatedAt: null }); const snapshotHash = sha256(snapshot);
       await client.query(`INSERT INTO product_revisions(id,merchant_id,product_id,version,snapshot_json,snapshot_hash,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [revisionId, merchantId, productId, version, snapshot, snapshotHash, userId, now]);
       await client.query(`UPDATE products SET sku=$3,name=$4,description=$5,price_paise=$6,refundable=$7,refund_window_days=$8,active=$9,version=$10,current_revision_id=$11,updated_at=$12 WHERE merchant_id=$1 AND id=$2`, [merchantId, productId, next.sku, next.name, next.description, next.pricePaise, next.refundable, next.refundWindowDays, next.active, version, revisionId, now]);
       const product = await this.getProduct(merchantId, productId, client);
@@ -206,13 +265,13 @@ export class AgentRailStore {
     if (query) { values.push(`%${query}%`); where.push(`(p.name ILIKE $${values.length} OR p.description ILIKE $${values.length} OR p.sku ILIKE $${values.length})`); }
     if (cursor) { values.push(cursor); where.push(`p.id::text>$${values.length}`); }
     const capped = Math.min(limit, 100); values.push(capped + 1);
-    const result = await this.pool.query(`SELECT p.*,pr.snapshot_hash FROM products p JOIN product_revisions pr ON pr.id=p.current_revision_id WHERE ${where.join(" AND ")} ORDER BY p.id LIMIT $${values.length}`, values);
+    const result = await this.pool.query(`SELECT p.*,pr.snapshot_hash,mc.shop_domain FROM products p JOIN product_revisions pr ON pr.id=p.current_revision_id LEFT JOIN merchant_catalog_connections mc ON mc.merchant_id=p.merchant_id WHERE ${where.join(" AND ")} ORDER BY p.id LIMIT $${values.length}`, values);
     const rows = result.rows.slice(0, capped);
     return { products: rows.map(mapProduct), nextCursor: result.rows.length > capped ? rows.at(-1)!.id : null };
   }
 
   async getProduct(merchantId: string, productId: string, db: Queryable = this.pool): Promise<Product | null> {
-    const result = await db.query("SELECT p.*,pr.snapshot_hash FROM products p JOIN product_revisions pr ON pr.id=p.current_revision_id WHERE p.merchant_id=$1 AND p.id=$2", [merchantId, productId]);
+    const result = await db.query("SELECT p.*,pr.snapshot_hash,mc.shop_domain FROM products p JOIN product_revisions pr ON pr.id=p.current_revision_id LEFT JOIN merchant_catalog_connections mc ON mc.merchant_id=p.merchant_id WHERE p.merchant_id=$1 AND p.id=$2", [merchantId, productId]);
     return result.rows[0] ? mapProduct(result.rows[0]) : null;
   }
 
@@ -288,8 +347,8 @@ export class AgentRailStore {
         return { kind: "denied" as const, intent: mapIntent(updated.rows[0]), decision };
       }
       const checkoutToken = randomBytes(32).toString("base64url"); const orderId = randomUUID(); const createdAt = new Date().toISOString();
-      await client.query(`INSERT INTO payment_orders(id,intent_lock_id,merchant_id,buyer_id,amount_paise,checkout_token_hash,checkout_token,status,observed_product_version,observed_product_revision_id,observed_snapshot_hash,observed_at,payment_config_version,created_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,'creating',$8,$9,$10,$11,$12,$13)`, [orderId, intent.id, intent.merchantId, intent.buyerId, product.pricePaise, sha256(checkoutToken), checkoutToken, product.version, product.revisionId, product.snapshotHash, decision.observedAt, paymentConfigVersion, createdAt]);
+      await client.query(`INSERT INTO payment_orders(id,intent_lock_id,merchant_id,buyer_id,amount_paise,checkout_token_hash,checkout_token,status,observed_product_version,observed_product_revision_id,observed_snapshot_hash,observed_catalog_source,observed_shop_domain,observed_at,payment_config_version,created_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,'creating',$8,$9,$10,$11,$12,$13,$14,$15)`, [orderId, intent.id, intent.merchantId, intent.buyerId, product.pricePaise, sha256(checkoutToken), checkoutToken, product.version, product.revisionId, product.snapshotHash, product.catalogAuthority.source, product.catalogAuthority.shopDomain ?? null, decision.observedAt, paymentConfigVersion, createdAt]);
       await client.query("UPDATE intent_locks SET status='executing' WHERE id=$1", [intent.id]);
       return { kind: "claimed" as const, intent: { ...intent, status: "executing" }, product, order: (await this.getOrder(orderId, client))!, decision };
     });
@@ -399,16 +458,17 @@ export class AgentRailStore {
   }
 }
 
-function productSnapshot(input: { id: string; merchantId: string; sku: string; name: string; description: string; pricePaise: number; refundable: boolean; refundWindowDays: number; active: boolean; version: number; revisionId: string }) {
-  return { ...input, currency: "INR", refundTermsAuthority: "merchant_stated", catalogAuthority: { type: "merchant_managed_catalog", merchantId: input.merchantId, source: "agentrail_server" } };
+function productSnapshot(input: { id: string; merchantId: string; sku: string; name: string; description: string; pricePaise: number; refundable: boolean; refundWindowDays: number; active: boolean; version: number; revisionId: string; catalogSource: "agentrail_server" | "shopify_admin_graphql"; shopDomain: string | null; externalId: string | null; externalUpdatedAt: string | null }) {
+  return { ...input, currency: "INR", refundTermsAuthority: "merchant_stated", catalogAuthority: { type: "merchant_managed_catalog", merchantId: input.merchantId, source: input.catalogSource, shopDomain: input.shopDomain } };
 }
 
 function mapUser(row: any): User { return { id: row.id, username: row.username, displayName: row.display_name, status: row.status, createdAt: iso(row.created_at) }; }
 function mapMerchant(row: any): Merchant { return { id: row.id, slug: row.slug, displayName: row.display_name, status: row.status, createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; }
 function mapPasskey(row: any): StoredPasskey { return { id: row.credential_id, userId: row.user_id, rpId: row.rp_id, publicKey: new Uint8Array(Buffer.from(row.public_key_b64, "base64")), counter: row.counter, deviceType: row.device_type, backedUp: row.backed_up, transports: row.transports_json }; }
-function mapProduct(row: any): Product { return { id: row.id, merchantId: row.merchant_id, sku: row.sku, name: row.name, description: row.description, pricePaise: row.price_paise, currency: "INR", refundable: row.refundable, refundWindowDays: row.refund_window_days, active: row.active, version: row.version, revisionId: row.current_revision_id, snapshotHash: row.snapshot_hash, catalogAuthority: { type: "merchant_managed_catalog", merchantId: row.merchant_id, source: "agentrail_server" }, refundTermsAuthority: "merchant_stated", createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; }
+function mapProduct(row: any): Product { return { id: row.id, merchantId: row.merchant_id, sku: row.sku, name: row.name, description: row.description, pricePaise: row.price_paise, currency: "INR", refundable: row.refundable, refundWindowDays: row.refund_window_days, active: row.active, version: row.version, revisionId: row.current_revision_id, snapshotHash: row.snapshot_hash, catalogAuthority: { type: "merchant_managed_catalog", merchantId: row.merchant_id, source: row.catalog_source ?? "agentrail_server", shopDomain: row.catalog_source === "shopify_admin_graphql" ? row.shop_domain ?? null : null }, refundTermsAuthority: "merchant_stated", createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }; }
 function mapIntent(row: any): IntentLock { return { id: row.id, buyerId: row.buyer_id, merchantId: row.merchant_id, productId: row.product_id, productRevisionId: row.product_revision_id, quantity: 1, currency: "INR", productSnapshotHash: row.product_snapshot_hash, lockedUnitPricePaise: row.locked_unit_price_paise, maxTotalPaise: row.max_total_paise, priceChangePolicy: row.price_change_policy, requireRefundable: row.require_refundable, minimumRefundWindowDays: row.minimum_refund_window_days, expiresAt: iso(row.expires_at), confirmationRequired: true, confirmedAt: row.confirmed_at ? iso(row.confirmed_at) : null, idempotencyKey: row.idempotency_key, status: row.status, createdAt: iso(row.created_at) }; }
-function mapOrder(row: any): PaymentOrder { return { id: row.id, intentLockId: row.intent_lock_id, merchantId: row.merchant_id, buyerId: row.buyer_id, providerOrderId: row.provider_order_id ?? "pending", amountPaise: row.amount_paise, currency: "INR", checkoutToken: row.checkout_token, status: row.status, paymentId: row.payment_id, createdAt: iso(row.created_at), observedProductVersion: row.observed_product_version, observedProductRevisionId: row.observed_product_revision_id, observedProductSnapshotHash: row.observed_snapshot_hash, catalogAuthority: { type: "merchant_managed_catalog", merchantId: row.merchant_id, source: "agentrail_server" }, observedAt: iso(row.observed_at), paymentConfigVersion: row.payment_config_version }; }
+function mapOrder(row: any): PaymentOrder { return { id: row.id, intentLockId: row.intent_lock_id, merchantId: row.merchant_id, buyerId: row.buyer_id, providerOrderId: row.provider_order_id ?? "pending", amountPaise: row.amount_paise, currency: "INR", checkoutToken: row.checkout_token, status: row.status, paymentId: row.payment_id, createdAt: iso(row.created_at), observedProductVersion: row.observed_product_version, observedProductRevisionId: row.observed_product_revision_id, observedProductSnapshotHash: row.observed_snapshot_hash, catalogAuthority: { type: "merchant_managed_catalog", merchantId: row.merchant_id, source: row.observed_catalog_source ?? "agentrail_server", shopDomain: row.observed_shop_domain ?? null }, observedAt: iso(row.observed_at), paymentConfigVersion: row.payment_config_version }; }
+function mapCatalogConnection(row: any): CatalogConnection { return { merchantId: row.merchant_id, provider: row.provider, shopDomain: row.shop_domain, accessTokenCiphertext: row.access_token_ciphertext, encryptionKeyVersion: row.encryption_key_version, status: row.status, shopName: row.shop_name, currency: row.currency, defaultRefundable: row.default_refundable, defaultRefundWindowDays: row.default_refund_window_days, lastSyncAt: row.last_sync_at ? iso(row.last_sync_at) : null }; }
 function mapPaymentConfig(row: any): PaymentConfiguration { return { merchantId: row.merchant_id, adapter: row.adapter, keyId: row.key_id, keySecretCiphertext: row.key_secret_ciphertext, webhookSecretCiphertext: row.webhook_secret_ciphertext, encryptionKeyVersion: row.encryption_key_version, version: row.version }; }
 function mapAudit(row: any): AuditEvent { return { id: row.id, sequence: row.sequence, scopeType: row.scope_type, scopeId: row.scope_id, merchantId: row.merchant_id, intentLockId: row.intent_lock_id, eventType: row.event_type, actor: row.actor, reasonCode: row.reason_code, payload: row.payload_json, previousHash: row.previous_hash, hash: row.hash, createdAt: iso(row.created_at) }; }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }

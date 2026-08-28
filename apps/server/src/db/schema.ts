@@ -47,8 +47,15 @@ export const apiKeys = pgTable("merchant_api_keys", {
 export const products = pgTable("products", {
   id: uuid("id").primaryKey(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), sku: text("sku").notNull(), name: text("name").notNull(), description: text("description").notNull().default(""),
   pricePaise: integer("price_paise").notNull(), currency: text("currency").notNull().default("INR"), refundable: boolean("refundable").notNull(), refundWindowDays: integer("refund_window_days").notNull(), active: boolean("active").notNull().default(true), version: integer("version").notNull().default(1),
-  currentRevisionId: uuid("current_revision_id").notNull(), createdAt: createdAt(), updatedAt: updatedAt(),
+  currentRevisionId: uuid("current_revision_id").notNull(), catalogSource: text("catalog_source").notNull().default("agentrail_server"), externalId: text("external_id"), externalUpdatedAt: timestamp("external_updated_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(), updatedAt: updatedAt(),
 }, (table) => [uniqueIndex("products_merchant_sku_unique").on(table.merchantId, table.sku), uniqueIndex("products_merchant_id_unique").on(table.merchantId, table.id), index("products_search_idx").on(table.merchantId, table.active)]);
+
+export const catalogConnections = pgTable("merchant_catalog_connections", {
+  merchantId: uuid("merchant_id").primaryKey().references(() => merchants.id), provider: text("provider").notNull(), shopDomain: text("shop_domain").notNull().unique(),
+  accessTokenCiphertext: text("access_token_ciphertext").notNull(), encryptionKeyVersion: integer("encryption_key_version").notNull(), status: text("status").notNull().default("active"),
+  shopName: text("shop_name").notNull(), currency: text("currency").notNull(), defaultRefundable: boolean("default_refundable").notNull().default(false), defaultRefundWindowDays: integer("default_refund_window_days").notNull().default(0),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(), updatedAt: updatedAt(),
+});
 
 export const productRevisions = pgTable("product_revisions", {
   id: uuid("id").primaryKey(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").notNull().references(() => products.id), version: integer("version").notNull(),
@@ -73,7 +80,7 @@ export const approvalSessions = pgTable("approval_sessions", {
 export const paymentOrders = pgTable("payment_orders", {
   id: uuid("id").primaryKey(), intentLockId: uuid("intent_lock_id").notNull().references(() => intentLocks.id).unique(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), buyerId: uuid("buyer_id").notNull().references(() => users.id),
   providerOrderId: text("provider_order_id").unique(), amountPaise: integer("amount_paise").notNull(), currency: text("currency").notNull().default("INR"), checkoutTokenHash: text("checkout_token_hash").notNull().unique(), checkoutToken: text("checkout_token").notNull(), status: text("status").notNull(), paymentId: text("payment_id").unique(),
-  observedProductVersion: integer("observed_product_version").notNull(), observedProductRevisionId: uuid("observed_product_revision_id").notNull().references(() => productRevisions.id), observedSnapshotHash: text("observed_snapshot_hash").notNull(), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), paymentConfigVersion: integer("payment_config_version").notNull(), createdAt: createdAt(),
+  observedProductVersion: integer("observed_product_version").notNull(), observedProductRevisionId: uuid("observed_product_revision_id").notNull().references(() => productRevisions.id), observedSnapshotHash: text("observed_snapshot_hash").notNull(), observedCatalogSource: text("observed_catalog_source").notNull().default("agentrail_server"), observedShopDomain: text("observed_shop_domain"), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), paymentConfigVersion: integer("payment_config_version").notNull(), createdAt: createdAt(),
 }, (table) => [index("orders_merchant_idx").on(table.merchantId), index("orders_buyer_idx").on(table.buyerId)]);
 
 export const webhookEvents = pgTable("webhook_events", {
