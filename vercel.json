@@ -2,6 +2,21 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "buildCommand": "npm run build:vercel",
+  "functions": {
+    "api/[...path].ts": {
+      "maxDuration": 60,
+      "includeFiles": "apps/server/drizzle/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/mcp", "destination": "/api/__spendseal_mcp" },
+    { "source": "/oauth/:path*", "destination": "/api/__spendseal_oauth/:path*" },
+    { "source": "/.well-known/:path*", "destination": "/api/__spendseal_well_known/:path*" },
+    { "source": "/login", "destination": "/index.html" },
+    { "source": "/approve/:path*", "destination": "/index.html" },
+    { "source": "/checkout/:path*", "destination": "/index.html" },
+    { "source": "/audit/:path*", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/(.*)",
