@@ -3,7 +3,7 @@ declare const chrome: any;
 (() => {
   if ((globalThis as any).__spendsealLoaded) return;
   (globalThis as any).__spendsealLoaded = true;
-  const VERSION = "1.0.0";
+  const VERSION = "1.1.0";
   chrome.runtime.onMessage.addListener((message: any, _sender: any, respond: (value: any) => void) => {
     void run(message).then(respond).catch((error) => respond({ error: error instanceof Error ? error.message : "Inspection failed" })); return true;
   });
@@ -15,24 +15,43 @@ declare const chrome: any;
     if (message.action === "submitLive") return submitLive(message);
     if (message.action === "executionOutcome") return executionOutcome();
     if (message.action !== "inspect") throw new Error("Unknown page command");
-    return isCheckout(site) ? checkout(site) : candidates(site);
+    return isCheckout(site) ? checkout(site) : candidates(site, message.query, message.maxTotalPaise);
   }
   function siteFor(host: string) { const value = host.toLowerCase(); if (["amazon.in", "www.amazon.in"].includes(value)) return "amazon_in"; if (["flipkart.com", "www.flipkart.com"].includes(value)) return "flipkart_in"; return null; }
   function blocked() { const value = document.body.innerText.toLowerCase(); return /captcha|enter the characters|verify you are human|login to continue|enter otp|one time password|3d secure/.test(value); }
   function actionReason() { const value = document.body.innerText.toLowerCase(); if (value.includes("captcha") || value.includes("verify you are human")) return "CAPTCHA requires the user."; if (value.includes("otp") || value.includes("3d secure")) return "Bank or OTP challenge requires the user."; return "Sign in requires the user."; }
   function isCheckout(site: string) { return site === "amazon_in" ? /checkout|buy\/spc|gp\/buy/.test(location.pathname) : /checkout|payment|buy-now/.test(location.pathname); }
-  async function candidates(site: string) {
+  async function candidates(site: string, query?: string | null, maxTotalPaise?: number) {
     const selector = site === "amazon_in" ? "[data-component-type='s-search-result'], #dp-container" : "[data-id], div[data-tkid]";
-    const cards = [...document.querySelectorAll(selector)].slice(0, 3) as HTMLElement[]; const found: any[] = [];
+    const cards = [...document.querySelectorAll(selector)].slice(0, 40) as HTMLElement[];
+    const ranked: { candidate: any; relevance: number; rating: number; reviewCount: number }[] = [];
+    const queryTerms = meaningfulTerms(query ?? "");
+    const seen = new Set<string>();
     for (const card of cards) {
       const link = card.querySelector("a[href]") as HTMLAnchorElement | null; const productUrl = canonical(link?.href ?? location.href, site); const canonicalProductId = productId(productUrl, site);
       const title = text(card, site === "amazon_in" ? "h2, #productTitle" : "a[title], .VU-ZEz, h1") || document.title;
       const pricePaise = money(text(card, site === "amazon_in" ? ".a-price .a-offscreen, #priceblock_ourprice, .a-price-whole" : "._30jeq3, .Nx9bqj, div[class*='price']"));
-      if (!canonicalProductId || !title || !pricePaise) continue;
+      if (!canonicalProductId || !title || !pricePaise || seen.has(canonicalProductId)) continue;
+      if (typeof maxTotalPaise === "number" && pricePaise > maxTotalPaise) continue;
+      const relevance = relevanceScore(title, queryTerms);
+      const requiredCoverage = queryTerms.length <= 1 ? 1 : 0.5;
+      if (queryTerms.length && relevance.coverage < requiredCoverage) continue;
+      seen.add(canonicalProductId);
       const candidate: any = { canonicalProductId, listingId: canonicalProductId, title, seller: seller(card, site), variant: variant(card), condition: productCondition(card), availability: "available", pricePaise, currency: "INR", productUrl, observedAt: new Date().toISOString(), adapterId: site, adapterVersion: VERSION };
-      candidate.snapshotHash = await digest(candidate); found.push(candidate);
+      candidate.snapshotHash = await digest(candidate);
+      ranked.push({ candidate, relevance: relevance.score, rating: ratingFromCard(card, site), reviewCount: reviewCountFromCard(card, site) });
     }
-    return found.length ? { kind: "candidates", candidates: found } : { kind: "unknown", reason: "CHECKOUT_UNVERIFIABLE" };
+    ranked.sort((left, right) => {
+      const leftQuality = left.relevance * 100 + left.rating * 12 + Math.log10(left.reviewCount + 1) * 8;
+      const rightQuality = right.relevance * 100 + right.rating * 12 + Math.log10(right.reviewCount + 1) * 8;
+      return rightQuality - leftQuality || left.candidate.pricePaise - right.candidate.pricePaise;
+    });
+    const best = ranked.slice(0, 3);
+    return best.length ? {
+      kind: "candidates",
+      candidates: best.map(({ candidate }) => candidate),
+      ranking: best.map(({ candidate, rating, reviewCount }, index) => ({ canonicalProductId: candidate.canonicalProductId, rank: index + 1, rating: rating || null, reviewCount: reviewCount || null })),
+    } : { kind: "unknown", reason: "NO_MATCHING_PRODUCTS_UNDER_BUDGET" };
   }
   async function checkout(site: string) {
     const root = document.body;
@@ -75,6 +94,10 @@ declare const chrome: any;
   function productId(url: string, site: string) { const parsed = new URL(url); return site === "amazon_in" ? parsed.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i)?.[1]?.toUpperCase() ?? null : parsed.searchParams.get("pid") ?? parsed.pathname.match(/\/p\/([A-Za-z0-9]+)/)?.[1] ?? null; }
   function productIdFromPage(site: string) { const html = document.documentElement.innerHTML; return site === "amazon_in" ? html.match(/"asin"\s*:\s*"([A-Z0-9]{10})"/i)?.[1] ?? null : html.match(/"productId"\s*:\s*"([A-Z0-9]+)"/i)?.[1] ?? null; }
   function text(root: ParentNode, selector: string) { return (root.querySelector(selector)?.textContent ?? "").replace(/\s+/g, " ").trim(); }
+  function meaningfulTerms(value: string) { const ignored = new Set(["a", "an", "and", "best", "buy", "find", "for", "in", "me", "of", "on", "the", "under", "with"]); return [...new Set(value.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((term) => term.length > 1 && !ignored.has(term)))]; }
+  function relevanceScore(title: string, terms: string[]) { if (!terms.length) return { score: 0, coverage: 1 }; const normalized = ` ${title.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `; const matched = terms.filter((term) => normalized.includes(` ${term} `)); const coverage = matched.length / terms.length; const phrase = terms.length > 1 && normalized.includes(` ${terms.join(" ")} `) ? 1 : 0; return { coverage, score: coverage * 5 + phrase * 2 }; }
+  function ratingFromCard(card: ParentNode, site: string) { const value = text(card, site === "amazon_in" ? ".a-icon-alt, [aria-label*='out of 5 stars']" : "._3LWZlK, [class*='XQDdHH']"); const match = value.match(/([0-5](?:\.[0-9])?)/); return match?.[1] ? Number(match[1]) : 0; }
+  function reviewCountFromCard(card: ParentNode, site: string) { const value = text(card, site === "amazon_in" ? ".a-size-base.s-underline-text, [aria-label*='ratings']" : "._2_R_DZ, [class*='Wphh3N']"); const values = [...value.matchAll(/[0-9][0-9,]*/g)].map((match) => Number(match[0].replaceAll(",", ""))).filter(Number.isFinite); return values.length ? Math.max(...values) : 0; }
   function money(value: string) { const match = value.replaceAll(",", "").match(/(?:₹|Rs\.?|INR)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i); return match?.[1] ? Math.round(Number(match[1]) * 100) : 0; }
   function seller(root: ParentNode, site: string) { return text(root, site === "amazon_in" ? "#sellerProfileTriggerId, #merchant-info" : "#sellerName, [class*='seller']") || null; }
   function variant(root: ParentNode) { return text(root, "#variation_size_name .selection, #variation_color_name .selection, [class*='variant']") || null; }

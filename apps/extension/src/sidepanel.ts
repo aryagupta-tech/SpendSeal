@@ -6,6 +6,7 @@ const active = byId("active");
 const detail = byId("task-detail");
 const actions = byId("actions");
 const notice = byId("notice");
+const rankingByProduct = new Map<string, any>();
 
 byId("connect").onclick = () => act({ type: "connect" }, load);
 byId("refresh").onclick = loadTasks;
@@ -49,14 +50,17 @@ function render(task: any, candidates: any[]) {
     addAction("Inspect visible page", async () => {
       const result = await send({ type: "inspect", taskId: task.id });
       if (result.error) return show(result.error, true);
-      if (result.candidates) { task.status = "selection_required"; render(task, result.candidates); }
+      if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); }
       else if (result.task) { render(result.task, []); show("Exact checkout observed. Approve it with your passkey in SpendSeal."); }
     });
   }
   if (task.status === "selection_required") {
-    for (const candidate of candidates) {
+    const explanation = document.createElement("p"); explanation.className = "ranking-note"; explanation.textContent = "SpendSeal ranked visible products by how closely they match your request, then used rating/review signals and price. You make the final choice."; actions.append(explanation);
+    for (const [index, candidate] of candidates.entries()) {
+      const ranking = rankingByProduct.get(candidate.canonicalProductId);
+      const quality = ranking?.rating ? ` · ${ranking.rating}/5${ranking.reviewCount ? ` (${ranking.reviewCount.toLocaleString("en-IN")} reviews)` : ""}` : "";
       const card = document.createElement("article"); card.className = "candidate";
-      card.innerHTML = `<b>${escapeHtml(candidate.title)}</b><div class="meta">${rupees(candidate.pricePaise)} · ${escapeHtml(candidate.seller ?? "seller not stated")}</div><button>Select this exact listing</button>`;
+      card.innerHTML = `<span class="rank">${index === 0 ? "BEST VISIBLE MATCH" : `MATCH #${index + 1}`}</span><b>${escapeHtml(candidate.title)}</b><div class="meta">${rupees(candidate.pricePaise)}${quality} · ${escapeHtml(candidate.seller ?? "seller not stated")}</div><button>Select this exact listing</button>`;
       card.querySelector("button")!.addEventListener("click", () => act(
         { type: "select", taskId: task.id, candidateId: candidate.id, productUrl: candidate.productUrl },
         (result) => { render(result.task, []); show("Selected. SpendSeal opened the exact listing."); },

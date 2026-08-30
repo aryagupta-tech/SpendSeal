@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SpendSeal — Safe Purchase Preparation",
   "short_name": "SpendSeal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prepare Amazon India and Flipkart purchases under exact buyer-approved constraints.",
   "permissions": ["activeTab", "scripting", "storage", "identity", "sidePanel"],
   "host_permissions": ["https://spendseal.vercel.app/*", "https://amazon.in/*", "https://www.amazon.in/*", "https://flipkart.com/*", "https://www.flipkart.com/*"],

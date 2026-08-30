@@ -6,6 +6,8 @@ header { padding: 18px; border: 1px solid #25483b; border-radius: 20px; backgrou
 h1 { font-size: 25px; line-height: 1.05; margin: 12px 0; }
 p, footer { color: #91a39b; line-height: 1.5; font-size: 13px; }
 .eyebrow { font: 700 10px ui-monospace; letter-spacing: .2em; color: #70edbd; }
+.header-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.version, .rank { color: #70edbd; font: 700 9px ui-monospace; letter-spacing: .1em; }
 section { margin-top: 16px; }
 .section-head { display: flex; justify-content: space-between; align-items: center; }
 h2 { font-size: 14px; }
@@ -19,5 +21,7 @@ button { width: 100%; padding: 13px; border: 0; border-radius: 12px; background:
 .danger { border-color: #733c3c; color: #ffbaba; background: #261515; }
 .success { border-color: #27644d; color: #70edbd; background: #0a2018; }
 #actions { display: grid; gap: 10px; margin-top: 12px; }
+.ranking-note { margin: 0; padding: 12px; border: 1px solid #29483d; border-radius: 12px; background: #0a1914; }
+.candidate .rank { display: inline-block; margin-bottom: 8px; }
 #actions a { padding: 13px; border-radius: 12px; background: #70edbd; color: #04100c; text-align: center; font-weight: 750; text-decoration: none; }
 footer { margin-top: 28px; border-top: 1px solid #1e332b; padding-top: 16px; }
