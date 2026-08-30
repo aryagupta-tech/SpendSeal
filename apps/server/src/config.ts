@@ -47,7 +47,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     extensionOauthClientId: process.env.EXTENSION_OAUTH_CLIENT_ID ?? "spendseal-browser-extension",
     browserAgentEnabled: process.env.BROWSER_AGENT_ENABLED !== "false",
     // This is the deployment-wide kill switch. Each buyer must still opt in from SpendSeal.
-    browserLivePurchaseEnabled: process.env.BROWSER_LIVE_PURCHASE_ENABLED === "true",
+    // Available without hosting-console setup, but still off per buyer until they explicitly opt in.
+    // Operators may set this to false as an emergency deployment-wide shutdown.
+    browserLivePurchaseEnabled: process.env.BROWSER_LIVE_PURCHASE_ENABLED !== "false",
     openAiCreditsLiveEnabled: process.env.OPENAI_CREDITS_LIVE_ENABLED === "true",
     genericWebLiveEnabled: process.env.GENERIC_WEB_LIVE_ENABLED === "true",
     ...overrides,
