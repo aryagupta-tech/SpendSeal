@@ -26,6 +26,13 @@ export function evaluateBrowserCheckout(input: { task: ShoppingTask; candidate: 
   if (observation.quantity !== 1) reasons.push("QUANTITY_CHANGED");
   if (observation.extraCartItemCount > 0) reasons.push("UNEXPECTED_CART_ITEMS");
   if (observation.finalTotalPaise > task.maxTotalPaise) reasons.push("BUDGET_EXCEEDED");
+  if (!observation.maskedAddressLabel || !observation.addressFingerprint) reasons.push("CHECKOUT_UNVERIFIABLE");
+  if (!observation.deliveryDate) reasons.push("CHECKOUT_UNVERIFIABLE");
+  if (!task.paymentPreference) reasons.push("PAYMENT_OPTION_UNAVAILABLE");
+  if (task.paymentPreference && observation.paymentPreference !== task.paymentPreference) reasons.push("PAYMENT_METHOD_CHANGED");
+  if (!observation.paymentMethodType) reasons.push("PAYMENT_OPTION_UNAVAILABLE");
+  if (task.paymentPreference === "cash_on_delivery" && observation.paymentMethodType !== "cash_on_delivery") reasons.push("PAYMENT_METHOD_CHANGED");
+  if (task.paymentPreference === "online" && observation.paymentMethodType === "cash_on_delivery") reasons.push("PAYMENT_METHOD_CHANGED");
   if (task.requireRefundable && observation.refundable !== true) reasons.push("NOT_REFUNDABLE");
   if (task.minimumReturnWindowDays !== null && (observation.returnWindowDays ?? -1) < task.minimumReturnWindowDays) reasons.push("REFUND_POLICY_CHANGED");
   if (task.latestDeliveryDate && (!observation.deliveryDate || observation.deliveryDate > task.latestDeliveryDate)) reasons.push("CHECKOUT_UNVERIFIABLE");
@@ -35,7 +42,12 @@ export function evaluateBrowserCheckout(input: { task: ShoppingTask; candidate: 
     if (new Date(permit.expiresAt).getTime() <= now.getTime()) reasons.push("EXPIRED");
     if (!permit.confirmedAt) reasons.push("CONFIRMATION_REQUIRED");
     if (permit.status === "prepared" || permit.status === "submitting" || permit.status === "completed") reasons.push("REPLAY_DETECTED");
-    if (permit.checkoutSnapshotHash !== checkoutSnapshotHash(observation)) reasons.push("TOTAL_CHANGED");
+    const approved = permit.checkoutSnapshot;
+    if (approved.addressFingerprint !== observation.addressFingerprint) reasons.push("ADDRESS_CHANGED");
+    if (approved.deliveryDate !== observation.deliveryDate) reasons.push("DELIVERY_CHANGED");
+    if (approved.paymentPreference !== observation.paymentPreference || approved.paymentMethodType !== observation.paymentMethodType) reasons.push("PAYMENT_METHOD_CHANGED");
+    if (approved.finalTotalPaise !== observation.finalTotalPaise) reasons.push("TOTAL_CHANGED");
+    if (permit.checkoutSnapshotHash !== checkoutSnapshotHash(observation) && !reasons.some((reason) => ["ADDRESS_CHANGED", "DELIVERY_CHANGED", "PAYMENT_METHOD_CHANGED", "TOTAL_CHANGED"].includes(reason))) reasons.push("CHECKOUT_UNVERIFIABLE");
   }
   return { allowed: reasons.length === 0, reasons: reasons.length ? [...new Set(reasons)] : ["ALLOWED"] };
 }

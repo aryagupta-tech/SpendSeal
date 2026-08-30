@@ -4,7 +4,7 @@
 
 SpendSeal is a multi-merchant authorization firewall for AI-initiated payments, built for Razorpay AI Buildathon Track 01. It starts with an empty catalog. NovaDesk is optional demo data, not the product model.
 
-SpendSeal also includes a prepare-only browser purchasing agent for Amazon India and Flipkart. ChatGPT creates a constrained Shopping Task, the buyer chooses one exact listing, the local extension visibly reaches checkout using the buyer's existing signed-in browser, and a passkey approves the exact observed total. The extension re-checks every condition and records `PURCHASE_PREPARED`; it does not place a real order.
+SpendSeal also includes an automatic protected-checkout agent for Amazon India and Flipkart. ChatGPT creates a constrained Shopping Task, the buyer chooses one exact listing, and the local extension visibly configures Buy Now, the saved default address, delivery, and COD or online payment using the buyer's existing signed-in browser. A passkey approves the exact final checkout. SpendSeal then re-checks every protected detail and records `PURCHASE_PREPARED` by default; controlled live ordering remains owner-gated.
 
 No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and calls ordinary MCP tools. No MCP tool can approve a mandate or complete payment.
 
@@ -68,6 +68,7 @@ Use the permanent **Production** domain for every security setting. Do not use a
    EXTENSION_OAUTH_CLIENT_ID=spendseal-browser-extension
    BROWSER_AGENT_ENABLED=true
    BROWSER_LIVE_PURCHASE_ENABLED=false
+   BROWSER_LIVE_BUYER_IDS=
    DEMO_MODE=false
    ```
 
@@ -236,11 +237,12 @@ The extension supports Chrome, Edge, Arc, Brave, and other Chromium browsers. It
 3. Pin SpendSeal and open its side panel. Click **Connect SpendSeal**. OAuth opens `spendseal.vercel.app`; sign in with the same buyer account and authorize the three browser scopes.
 4. In ChatGPT, ask SpendSeal to create a Shopping Task for `amazon_in` or `flipkart_in`, using either a search query or one exact product URL and a maximum total in paise.
 5. Open the task in the extension. SpendSeal opens the visible website, observes up to three results, and requires you to choose one exact listing.
-6. Click **Open isolated Buy Now flow**. SpendSeal refuses unrelated cart items instead of deleting them. If the site asks for login, CAPTCHA, OTP, or a bank challenge, complete it yourself and then resume.
-7. At the final checkout, click **Inspect visible final checkout**. Review the Purchase Seal at `/shopping/{taskId}` and approve it with your SpendSeal passkey.
-8. Return to the extension and click **Re-check and prepare purchase**. The expected result is `PURCHASE_PREPARED`; no real order is submitted.
+6. After selection, SpendSeal automatically activates Buy Now, uses the website's saved default address and delivery option, and asks only **Cash on Delivery** or **Online payment**.
+7. For COD, SpendSeal selects it. For online payment, choose UPI, card, or netbanking directly on the website; SpendSeal never reads the underlying account or card details.
+8. SpendSeal shows one protected confirmation with the masked address, delivery date, seller, variant, quantity, payment type, charges, and final total. Approve it once with your passkey.
+9. SpendSeal automatically re-checks the visible checkout. The default expected result is `PURCHASE_PREPARED`; no live order is submitted. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with you.
 
-The build also produces `/downloads/spendseal-extension.zip`. Amazon and Flipkart are browser adapters, not official integrations. Their evidence is labeled `browser_observed` and never described as provider-verified. A generic active-tab fallback is inspect-only and cannot submit an order.
+The build also produces `/downloads/spendseal-extension.zip`. Amazon and Flipkart are browser adapters, not official integrations. Their evidence is labeled `browser_observed` and never described as provider-verified. Live mode requires both `BROWSER_LIVE_PURCHASE_ENABLED=true` and the exact buyer UUID in `BROWSER_LIVE_BUYER_IDS`; all other buyers stay prepare-only.
 
 OAuth metadata is published at `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, and `/.well-known/openid-configuration`. Authorization codes are single-use and expire after five minutes. Access tokens are opaque and live for fifteen minutes. Refresh tokens rotate and reuse revokes the whole family.
 

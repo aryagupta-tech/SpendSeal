@@ -1,21 +1,28 @@
-import { checkoutAmounts } from "./adapters";
+import { availablePaymentOptions, checkoutAmounts, checkoutStage } from "./adapters";
 declare const chrome: any;
 (() => {
   if ((globalThis as any).__spendsealLoaded) return;
   (globalThis as any).__spendsealLoaded = true;
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
   chrome.runtime.onMessage.addListener((message: any, _sender: any, respond: (value: any) => void) => {
     void run(message).then(respond).catch((error) => respond({ error: error instanceof Error ? error.message : "Inspection failed" })); return true;
   });
+  let changeTimer: number | null = null;
+  document.addEventListener("change", () => {
+    if (changeTimer !== null) window.clearTimeout(changeTimer);
+    changeTimer = window.setTimeout(() => { void chrome.runtime.sendMessage({ type: "checkoutChanged" }).catch(() => undefined); }, 500);
+  }, true);
   async function run(message: any) {
     if (window.top !== window) return { error: "Embedded checkout frames are refused." };
     const site = siteFor(location.hostname); if (!site) return { kind: "inspect_only", reason: "SITE_NOT_SUPPORTED" };
     if (blocked()) return { userActionRequired: true, reason: actionReason() };
     if (message.action === "buyNow") return clickBuyNow(site);
+    if (message.action === "configureCheckout") return configureCheckout(site, message.paymentPreference ?? null);
+    if (message.action === "choosePayment") return choosePayment(site, message.paymentPreference);
     if (message.action === "submitLive") return submitLive(message);
     if (message.action === "executionOutcome") return executionOutcome();
     if (message.action !== "inspect") throw new Error("Unknown page command");
-    return isCheckout(site) ? checkout(site) : candidates(site, message.query, message.maxTotalPaise);
+    return isCheckout(site) ? checkout(site, message.paymentPreference ?? null) : candidates(site, message.query, message.maxTotalPaise);
   }
   function siteFor(host: string) { const value = host.toLowerCase(); if (["amazon.in", "www.amazon.in"].includes(value)) return "amazon_in"; if (["flipkart.com", "www.flipkart.com"].includes(value)) return "flipkart_in"; return null; }
   function blocked() { const value = document.body.innerText.toLowerCase(); return /captcha|enter the characters|verify you are human|login to continue|enter otp|one time password|3d secure/.test(value); }
@@ -53,7 +60,7 @@ declare const chrome: any;
       ranking: best.map(({ candidate, rating, reviewCount }, index) => ({ canonicalProductId: candidate.canonicalProductId, rank: index + 1, rating: rating || null, reviewCount: reviewCount || null })),
     } : { kind: "unknown", reason: "NO_MATCHING_PRODUCTS_UNDER_BUDGET" };
   }
-  async function checkout(site: string) {
+  async function checkout(site: string, paymentPreference: "cash_on_delivery" | "online" | null) {
     const root = document.body;
     const inspectedUrl = canonical(location.href, site);
     const canonicalProductId = productId(inspectedUrl, site) || productIdFromPage(site);
@@ -65,8 +72,49 @@ declare const chrome: any;
     if (!canonicalProductId || !finalTotalPaise) return { kind: "unknown", reason: "CHECKOUT_UNVERIFIABLE" };
     const pin = (root.innerText.match(/[1-9][0-9]{5}/) ?? [])[0] ?? null;
     const addressText = deliveryAddressText(root, site);
-    const observation: any = { site, sourceUrl: url, canonicalProductId, listingId: canonicalProductId, title, seller: seller(root, site), variant: variant(root), condition: productCondition(root), quantity, currency: "INR", itemSubtotalPaise: amounts.itemSubtotalPaise || finalTotalPaise, shippingPaise: amounts.shippingPaise, taxPaise: amounts.taxPaise, discountPaise: amounts.discountPaise, finalTotalPaise, extraCartItemCount, refundable: returnable(root.innerText), returnWindowDays: returnDays(root.innerText), deliveryDate: deliveryDate(root.innerText), maskedAddressLabel: pin ? `Delivery PIN ••••${pin.slice(-2)}` : null, addressFingerprint: addressText ? await digest({ address: addressText, site }) : pin ? await digest({ pin, site }) : null, paymentMethodType: selectedPaymentType(), observedAt: new Date().toISOString(), adapterId: site, adapterVersion: VERSION, evidenceAssurance: "browser_observed" };
+    const observation: any = { site, sourceUrl: url, canonicalProductId, listingId: canonicalProductId, title, seller: seller(root, site), variant: variant(root), condition: productCondition(root), quantity, currency: "INR", itemSubtotalPaise: amounts.itemSubtotalPaise || finalTotalPaise, shippingPaise: amounts.shippingPaise, taxPaise: amounts.taxPaise, discountPaise: amounts.discountPaise, finalTotalPaise, extraCartItemCount, refundable: returnable(root.innerText), returnWindowDays: returnDays(root.innerText), deliveryDate: deliveryDate(root.innerText), maskedAddressLabel: maskedAddress(addressText, pin), addressFingerprint: addressText ? await digest({ address: addressText, site }) : pin ? await digest({ pin, site }) : null, paymentPreference, paymentMethodType: selectedPaymentType(), observedAt: new Date().toISOString(), adapterId: site, adapterVersion: VERSION, evidenceAssurance: "browser_observed" };
     return { kind: "checkout", observation };
+  }
+  async function configureCheckout(site: string, paymentPreference: "cash_on_delivery" | "online" | null) {
+    if (!isCheckout(site)) return { reason: "AUTOMATION_BLOCKED", detail: "SpendSeal is waiting for the website checkout page." };
+    const bodyText = document.body.innerText;
+    const stage = checkoutStage(bodyText);
+    if (stage === "address") {
+      const clicked = clickControl(/use this address|deliver to this address|ship to this address|continue to delivery/i);
+      return clicked ? { advanced: true, stage: "address", detail: "Using the website's saved default address." } : { userActionRequired: true, reason: "Choose or add a delivery address on the website, then resume SpendSeal." };
+    }
+    if (stage === "delivery") {
+      const clicked = clickControl(/use this delivery option|continue|save and continue/i);
+      return clicked ? { advanced: true, stage: "delivery", detail: "Keeping the website's default delivery option." } : { userActionRequired: true, reason: "Confirm a delivery option on the website, then resume SpendSeal." };
+    }
+    if (!paymentPreference) {
+      const options = availablePaymentOptions(bodyText);
+      return { paymentChoiceRequired: true, cashOnDeliveryAvailable: options.cashOnDelivery, onlineAvailable: options.online || stage !== "payment" };
+    }
+    if (paymentPreference === "online" && selectedPaymentType() === null) {
+      if (stage === "review") clickControl(/change.*payment|payment method/i);
+      return { paymentActionRequired: true, reason: "Choose UPI, card or netbanking directly on the website, then return to SpendSeal." };
+    }
+    if (stage === "payment") {
+      const clicked = clickControl(/use this payment method|continue|save and continue/i);
+      if (clicked) return { advanced: true, stage: "payment", detail: "Opening the final order review." };
+    }
+    const observed = await checkout(site, paymentPreference);
+    if (observed.kind === "checkout" && checkoutEvidenceComplete(observed.observation)) return { finalReview: true, ...observed };
+    return { reason: "CHECKOUT_UNVERIFIABLE", detail: "SpendSeal cannot yet read the saved address, delivery date, payment type and complete total. Keep the final review page visible and retry." };
+  }
+  function choosePayment(_site: string, preference: "cash_on_delivery" | "online") {
+    if (preference === "online") {
+      if (checkoutStage(document.body.innerText) === "review") clickControl(/change.*payment|payment method/i);
+      return { selected: true, paymentActionRequired: true, detail: "Choose UPI, card or netbanking on the website. SpendSeal never reads the account or card details." };
+    }
+    const choice = findPaymentChoice(/cash on delivery|pay on delivery|cash\/pay on delivery/i);
+    if (!choice) return { selected: false, reason: "PAYMENT_OPTION_UNAVAILABLE", detail: "Cash on Delivery is not offered for this order or delivery address." };
+    choice.click();
+    const radio = choice.matches("input[type='radio']") ? choice : choice.querySelector("input[type='radio']") as HTMLElement | null;
+    radio?.click();
+    clickControl(/use this payment method|continue|save and continue/i);
+    return { selected: true, advanced: true, detail: "Cash on Delivery selected." };
   }
   function clickBuyNow(site: string) {
     const selectors = site === "amazon_in"
@@ -91,7 +139,15 @@ declare const chrome: any;
         : "Open the exact Amazon or Flipkart product page first, then try again.",
     };
   }
-  function submitLive(message: any) { if (message.livePurchaseEnabled !== true || typeof message.executionGrant !== "string" || message.executionGrant.length < 20) return { submitted: false, reason: "LIVE_PURCHASE_DISABLED" }; const buttons = [...document.querySelectorAll("button, input[type='submit']")] as HTMLElement[]; const button = buttons.find((element) => /place (your )?order|confirm order|buy now/i.test(element.innerText || (element as HTMLInputElement).value || "")); if (!button) return { submitted: false, reason: "AUTOMATION_BLOCKED" }; button.click(); return { submitted: true }; }
+  function submitLive(message: any) {
+    if (message.livePurchaseEnabled !== true || typeof message.executionGrant !== "string" || message.executionGrant.length < 20) return { submitted: false, reason: "LIVE_PURCHASE_DISABLED" };
+    const expected = message.paymentPreference === "cash_on_delivery"
+      ? /place (?:your )?order|confirm order/i
+      : /place (?:your )?order(?: and pay)?|continue to payment|pay now/i;
+    const button = interactiveElements().find((element) => expected.test(accessibleText(element)) && enabled(element));
+    if (!button) return { submitted: false, reason: "AUTOMATION_BLOCKED", detail: "The exact final order control could not be identified safely." };
+    button.click(); return { submitted: true };
+  }
   function executionOutcome() { const value = document.body.innerText.toLowerCase(); if (blocked()) return { status: "user_action_required", detail: actionReason() }; if (/order (?:has been )?placed|order confirmed|thank you for your order/.test(value)) return { status: "completed", detail: "Visible order confirmation detected." }; if (/payment failed|order failed|could not be completed/.test(value)) return { status: "failed", detail: "Visible failure page detected." }; return { status: "reconciliation_required", detail: "Submission outcome is not unambiguous on the visible page." }; }
   function canonical(raw: string, site: string) { const url = new URL(raw, location.href); if (siteFor(url.hostname) !== site) throw new Error("DOMAIN_MISMATCH"); url.hash = ""; ["tag", "ref", "qid", "sr", "affid"].forEach((key) => url.searchParams.delete(key)); return url.toString(); }
   function checkoutEvidenceUrl(raw: string) { const url = new URL(raw); url.search = ""; url.hash = ""; return url.toString(); }
@@ -103,16 +159,35 @@ declare const chrome: any;
   function ratingFromCard(card: ParentNode, site: string) { const value = text(card, site === "amazon_in" ? ".a-icon-alt, [aria-label*='out of 5 stars']" : "._3LWZlK, [class*='XQDdHH']"); const match = value.match(/([0-5](?:\.[0-9])?)/); return match?.[1] ? Number(match[1]) : 0; }
   function reviewCountFromCard(card: ParentNode, site: string) { const value = text(card, site === "amazon_in" ? ".a-size-base.s-underline-text, [aria-label*='ratings']" : "._2_R_DZ, [class*='Wphh3N']"); const values = [...value.matchAll(/[0-9][0-9,]*/g)].map((match) => Number(match[0].replaceAll(",", ""))).filter(Number.isFinite); return values.length ? Math.max(...values) : 0; }
   function money(value: string) { const match = value.replaceAll(",", "").match(/(?:₹|Rs\.?|INR)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i); return match?.[1] ? Math.round(Number(match[1]) * 100) : 0; }
-  function seller(root: ParentNode, site: string) { return text(root, site === "amazon_in" ? "#sellerProfileTriggerId, #merchant-info" : "#sellerName, [class*='seller']") || null; }
+  function seller(root: ParentNode, site: string) { const selected = text(root, site === "amazon_in" ? "#sellerProfileTriggerId, #merchant-info, [data-testid*='seller']" : "#sellerName, [class*='seller'], [data-testid*='seller']"); if (selected) return selected; return (root.textContent ?? "").match(/(?:sold by|seller)\s*:?\s*([^\n|]{2,80})/i)?.[1]?.trim() ?? null; }
   function variant(root: ParentNode) { return text(root, "#variation_size_name .selection, #variation_color_name .selection, [class*='variant']") || null; }
   function productCondition(root: ParentNode) { const value = (root.textContent ?? "").toLowerCase(); if (/\bused\b/.test(value)) return "used"; if (/refurbished|renewed/.test(value)) return "refurbished"; return "new"; }
-  function deliveryAddressText(root: ParentNode, site: string) { const selector = site === "amazon_in" ? "#address-book-entry-0, .ship-to-this-address, #deliver-to-customer-text" : "[class*='delivery-address'], [class*='address']"; return text(root, selector).toLowerCase(); }
-  function selectedPaymentType() { const selected = document.querySelector("input[type='radio']:checked") as HTMLInputElement | null; const container = selected?.closest("label, [role='radio'], div"); return paymentType(container?.textContent ?? ""); }
+  function deliveryAddressText(root: ParentNode, site: string) { const selector = site === "amazon_in" ? "#address-book-entry-0, .ship-to-this-address, #deliver-to-customer-text, .displayAddressDiv, [data-testid*='address']" : "[class*='delivery-address'], [class*='address'], [data-testid*='address']"; return text(root, selector).toLowerCase(); }
+  function selectedPaymentType() {
+    const selected = document.querySelector("input[type='radio']:checked") as HTMLInputElement | null;
+    const explicitLabel = selected?.id ? document.querySelector(`label[for='${CSS.escape(selected.id)}']`) : null;
+    const container = explicitLabel ?? selected?.closest("label, [role='radio'], .a-box");
+    const selectedText = container?.textContent ?? selected?.getAttribute("aria-label") ?? text(document, "[aria-checked='true'], [class*='selected'][class*='payment']");
+    return paymentType(selectedText);
+  }
   function quantityFromPage() { const select = document.querySelector("select[name='quantity']") as HTMLSelectElement | null; const raw = select?.value ?? text(document, "[class*='quantity'], .a-dropdown-prompt"); return Number(raw.match(/\d+/)?.[0] ?? 1); }
   function itemCount(site: string) { return document.querySelectorAll(site === "amazon_in" ? ".spc-order" : "[class*='cart-item'], [class*='order-item']").length || 1; }
   function returnable(value: string) { if (/non[- ]?returnable|not returnable|no returns/i.test(value)) return false; if (/returnable|returns? within|replacement/i.test(value)) return true; return null; }
   function returnDays(value: string) { const match = value.match(/(\d+)\s*day[s]?\s*(?:return|replacement)/i); return match?.[1] ? Number(match[1]) : null; }
-  function deliveryDate(value: string) { const match = value.match(/(?:delivery|arrives?).{0,30}(\d{1,2}\s+[A-Za-z]{3,9}(?:\s+\d{4})?)/i); if (!match?.[1]) return null; const parsed = new Date(match[1]); return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10); }
-  function paymentType(value: string) { if (/cash on delivery/i.test(value)) return "cash_on_delivery"; if (/upi/i.test(value)) return "upi"; if (/credit|debit|card/i.test(value)) return "card"; if (/net ?banking/i.test(value)) return "netbanking"; return null; }
+  function deliveryDate(value: string) { const match = value.match(/(?:delivery|arrives?|delivered by).{0,50}(?:(?:[A-Za-z]{3,9},?\s+)?(\d{1,2}\s+[A-Za-z]{3,9}(?:\s+\d{4})?|[A-Za-z]{3,9}\s+\d{1,2}(?:,?\s+\d{4})?))/i); if (!match?.[1]) return null; const withYear = /\d{4}/.test(match[1]) ? match[1] : `${match[1]} ${new Date().getFullYear()}`; const parsed = new Date(withYear); return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10); }
+  function paymentType(value: string) { if (/cash on delivery|pay on delivery/i.test(value)) return "cash_on_delivery"; if (/upi/i.test(value)) return "upi"; if (/credit|debit|card/i.test(value)) return "card"; if (/net ?banking/i.test(value)) return "netbanking"; return null; }
+  function maskedAddress(value: string, pin: string | null) { if (!value && !pin) return null; const city = value.match(/(?:^|,|\s)([a-z][a-z ]{2,24})\s+[1-9][0-9]{5}/i)?.[1]?.trim(); return `${city ? `${city} · ` : ""}PIN ••••${pin?.slice(-2) ?? "••"}`; }
+  function checkoutEvidenceComplete(observation: any) { return Boolean(observation.canonicalProductId && observation.seller && observation.finalTotalPaise && observation.deliveryDate && observation.maskedAddressLabel && observation.addressFingerprint && observation.paymentPreference && observation.paymentMethodType); }
+  function interactiveElements() { return [...document.querySelectorAll("button, input[type='submit'], input[type='button'], a[role='button'], [role='button']")] as HTMLElement[]; }
+  function accessibleText(element: HTMLElement) { const ids = element.getAttribute("aria-labelledby")?.split(/\s+/) ?? []; const linked = ids.map((id) => document.getElementById(id)?.textContent ?? "").join(" "); return `${element.id} ${element.getAttribute("name") ?? ""} ${element.getAttribute("aria-label") ?? ""} ${linked} ${element.innerText || (element as HTMLInputElement).value || element.textContent || ""}`.replace(/\s+/g, " ").trim(); }
+  function enabled(element: HTMLElement) { return !(element as HTMLButtonElement).disabled && element.getAttribute("aria-disabled") !== "true" && getComputedStyle(element).visibility !== "hidden"; }
+  function clickControl(pattern: RegExp) { const control = interactiveElements().find((element) => pattern.test(accessibleText(element)) && !/place (?:your )?order|pay now/i.test(accessibleText(element)) && enabled(element)); control?.click(); return Boolean(control); }
+  function findPaymentChoice(pattern: RegExp) {
+    const radios = [...document.querySelectorAll("input[type='radio']")] as HTMLInputElement[];
+    const radio = radios.find((input) => { const label = input.id ? document.querySelector(`label[for='${CSS.escape(input.id)}']`) : input.closest("label, [role='radio'], .a-box"); return pattern.test(`${input.getAttribute("aria-label") ?? ""} ${label?.textContent ?? ""}`) && enabled(input); });
+    if (radio) return radio;
+    const controls = [...document.querySelectorAll("label, [role='radio'], [class*='payment']")] as HTMLElement[];
+    return controls.find((element) => pattern.test(accessibleText(element)) && enabled(element)) ?? null;
+  }
   async function digest(value: unknown) { const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)))); return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 })();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionRequired, adapterForUrl, canonicalProductId, checkoutAmounts, parseRupees } from "./adapters";
+import { actionRequired, adapterForUrl, availablePaymentOptions, canonicalProductId, checkoutAmounts, checkoutStage, parseRupees } from "./adapters";
 
 describe("versioned browser adapters", () => {
   it("accepts only the exact supported domains", () => {
@@ -22,5 +22,13 @@ describe("versioned browser adapters", () => {
   it("pauses for security challenges", () => {
     expect(actionRequired("Please verify you are human")).toBe("captcha");
     expect(actionRequired("Enter OTP to continue")).toBe("otp");
+  });
+
+  it("recognizes checkout stages and payment choices from sanitized pages", () => {
+    expect(checkoutStage("Select a delivery address Use this address")).toBe("address");
+    expect(checkoutStage("Choose a delivery option FREE delivery")).toBe("delivery");
+    expect(checkoutStage("Select a payment method Cash on Delivery UPI")).toBe("payment");
+    expect(checkoutStage("Review your order Order total ₹950")).toBe("review");
+    expect(availablePaymentOptions("Pay on Delivery, UPI, credit card or Net Banking")).toEqual({ cashOnDelivery: true, online: true });
   });
 });

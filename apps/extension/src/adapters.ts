@@ -1,4 +1,5 @@
 export type AdapterSite = "amazon_in" | "flipkart_in";
+export type CheckoutStage = "address" | "delivery" | "payment" | "review" | "unknown";
 
 export function adapterForUrl(raw: string): AdapterSite | null {
   const host = new URL(raw).hostname.toLowerCase();
@@ -42,4 +43,21 @@ export function actionRequired(text: string): "captcha" | "login" | "otp" | null
   if (/enter otp|one time password|3d secure/.test(value)) return "otp";
   if (/login to continue|sign in to continue/.test(value)) return "login";
   return null;
+}
+
+export function checkoutStage(text: string): CheckoutStage {
+  const value = text.toLowerCase().replace(/\s+/g, " ");
+  if (/select (?:a )?delivery address|choose (?:a )?delivery address|use this address|deliver to this address/.test(value)) return "address";
+  if (/choose (?:a )?delivery option|delivery option|shipping speed|use this delivery option/.test(value)) return "delivery";
+  if (/select (?:a )?payment method|payment method|cash on delivery|pay on delivery|upi|net ?banking/.test(value)) return "payment";
+  if (/place (?:your )?order|order summary|order total|amount payable|review your order/.test(value)) return "review";
+  return "unknown";
+}
+
+export function availablePaymentOptions(text: string) {
+  const value = text.toLowerCase().replace(/\s+/g, " ");
+  return {
+    cashOnDelivery: /cash on delivery|pay on delivery|cash\/pay on delivery/.test(value),
+    online: /upi|credit card|debit card|net ?banking|online payment/.test(value),
+  };
 }

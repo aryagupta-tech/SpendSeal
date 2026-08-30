@@ -6,7 +6,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { z } from "zod";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { API_KEY_SCOPES, BROWSER_SCOPES, CreateIntentInputSchema, CreateShoppingTaskInputSchema, MCP_SCOPES, sha256 } from "@spendseal/core";
+import { API_KEY_SCOPES, BROWSER_SCOPES, CreateIntentInputSchema, CreateShoppingTaskInputSchema, MCP_SCOPES, PaymentPreferenceSchema, sha256 } from "@spendseal/core";
 import type { Config } from "./config.js";
 import { handleMcpRequest } from "./mcp.js";
 import { OAuthService } from "./oauth.js";
@@ -18,7 +18,7 @@ import { seedNovaDesk } from "./demo.js";
 import { BrowserAgentService, type BrowserPrincipal } from "./browser-agent.js";
 
 export function createApp(config: Config, store: SpendSealStore) {
-  const service = new SpendSealService(store, config); const browserAgent = new BrowserAgentService(store.pool, config.browserLivePurchaseEnabled, config.browserAgentEnabled); const webauthn = new SpendSealWebAuthn(store, config, browserAgent); const oauth = new OAuthService(store, config); const app = express();
+  const service = new SpendSealService(store, config); const browserAgent = new BrowserAgentService(store.pool, config.browserLivePurchaseEnabled, config.browserAgentEnabled, config.browserLiveBuyerIds); const webauthn = new SpendSealWebAuthn(store, config, browserAgent); const oauth = new OAuthService(store, config); const app = express();
   app.disable("x-powered-by"); app.set("trust proxy", 1);
   app.use((req, res, next) => { const id = String(req.header("x-request-id") ?? randomUUID()); res.setHeader("x-request-id", id); res.locals.requestId = id; const started = Date.now(); res.on("finish", () => console.log(JSON.stringify({ level: "info", event: "http_request", requestId: id, method: req.method, path: req.path, status: res.statusCode, durationMs: Date.now() - started }))); next(); });
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
@@ -115,14 +115,17 @@ export function createApp(config: Config, store: SpendSealStore) {
   app.get("/api/v1/shopping-tasks/:id/audit", requireBrowser, asyncHandler(async (req, res) => res.json(await browserAgent.audit(uuidParam(req.params.id), principal(res).user.id))));
   app.post("/api/v1/shopping-tasks/:id/approval/options", requireBrowser, requireCsrf, asyncHandler(async (req, res) => res.json(await webauthn.shoppingApprovalOptions(uuidParam(req.params.id), principal(res).user.id))));
   app.post("/api/v1/shopping-tasks/:id/approve", requireBrowser, requireCsrf, asyncHandler(async (req, res) => { const input = z.object({ challengeId: z.string().uuid(), response: z.unknown() }).parse(req.body); res.json({ task: await webauthn.approveShoppingTask(uuidParam(req.params.id), principal(res).user.id, input.challengeId, input.response as AuthenticationResponseJSON), approvalMethod: "passkey" }); }));
+  app.post("/api/v1/shopping-tasks/:id/approval-continuations/:continuationId/complete", requireBrowser, requireCsrf, asyncHandler(async (req, res) => res.json(await browserAgent.completeApprovalContinuation(uuidParam(req.params.id), principal(res).user.id, uuidParam(req.params.continuationId)))));
 
-  app.post("/api/v1/browser/installations", limit(store, "browser_installation", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const input = z.object({ installationId: z.string().uuid(), name: z.string().min(1).max(80) }).parse(req.body); await browserAgent.registerInstallation(extension, input); res.status(201).json({ registered: true, livePurchaseEnabled: config.browserLivePurchaseEnabled }); }));
+  app.post("/api/v1/browser/installations", limit(store, "browser_installation", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const input = z.object({ installationId: z.string().uuid(), name: z.string().min(1).max(80) }).parse(req.body); await browserAgent.registerInstallation(extension, input); res.status(201).json({ registered: true, livePurchaseEnabled: browserAgent.liveModeEnabledFor(extension.userId) }); }));
   app.delete("/api/v1/browser/installations/:id", limit(store, "browser_installation", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json({ revoked: await browserAgent.revokeInstallation(extension.userId, uuidParam(req.params.id)) }); }));
   app.get("/api/v1/browser/tasks/pending", limit(store, "browser_read", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json({ tasks: await browserAgent.listTasks(extension.userId, true) }); }));
   app.get("/api/v1/browser/tasks/:id", limit(store, "browser_read", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json(await browserAgent.getTask(uuidParam(req.params.id), extension.userId)); }));
   app.post("/api/v1/browser/tasks/:id/candidates", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), candidates: z.array(z.unknown()).min(1).max(3) }).parse(req.body); res.status(201).json({ candidates: await browserAgent.saveCandidates(extension.userId, input.installationId, uuidParam(req.params.id), input.candidates) }); }));
   app.post("/api/v1/browser/tasks/:id/select", limit(store, "browser_select", 30, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const candidateId = z.object({ candidateId: z.string().uuid() }).parse(req.body).candidateId; res.json({ task: await browserAgent.selectCandidate(uuidParam(req.params.id), extension.userId, candidateId) }); }));
-  app.post("/api/v1/browser/tasks/:id/status", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), status: z.enum(["searching", "navigating", "user_action_required", "failed"]), detail: z.string().max(240).optional() }).parse(req.body); await browserAgent.reportStatus(uuidParam(req.params.id), extension.userId, input.installationId, input.status, input.detail); res.json({ recorded: true }); }));
+  app.post("/api/v1/browser/tasks/:id/payment-preference", limit(store, "browser_select", 30, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const input = z.object({ installationId: z.string().uuid(), paymentPreference: PaymentPreferenceSchema }).parse(req.body); res.json({ task: await browserAgent.setPaymentPreference(uuidParam(req.params.id), extension.userId, input.installationId, input.paymentPreference) }); }));
+  app.post("/api/v1/browser/tasks/:id/approval-continuation", limit(store, "browser_execute", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:execute"); const input = z.object({ installationId: z.string().uuid(), redirectUri: z.string().url(), state: z.string().min(20).max(200) }).parse(req.body); const continuation = await browserAgent.createApprovalContinuation(uuidParam(req.params.id), extension.userId, input.installationId, input); res.status(201).json({ ...continuation, authorizeUrl: `${config.publicBaseUrl}/shopping/${uuidParam(req.params.id)}?continuation=${continuation.continuationId}` }); }));
+  app.post("/api/v1/browser/tasks/:id/status", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), status: z.enum(["searching", "navigating", "checkout_configuring", "payment_choice_required", "payment_action_required", "user_action_required", "failed"]), detail: z.string().max(240).optional() }).parse(req.body); await browserAgent.reportStatus(uuidParam(req.params.id), extension.userId, input.installationId, input.status, input.detail); res.json({ recorded: true }); }));
   app.post("/api/v1/browser/tasks/:id/checkout-observation", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), observation: z.unknown() }).parse(req.body); res.status(201).json(await browserAgent.observeCheckout(uuidParam(req.params.id), extension.userId, input.installationId, input.observation)); }));
   app.post("/api/v1/browser/tasks/:id/execution-claim", limit(store, "browser_execute", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:execute"); const input = z.object({ installationId: z.string().uuid(), observation: z.unknown() }).parse(req.body); res.json(await browserAgent.claimExecution(uuidParam(req.params.id), extension.userId, input.installationId, input.observation)); }));
   app.post("/api/v1/browser/tasks/:id/execution-result", limit(store, "browser_execute", 20, 60), asyncHandler(async (req, res) => {
@@ -206,8 +209,8 @@ function consentPage(input: { clientId: string; redirectUri: string; resource: s
 function browserErrorStatus(code: string): number | null {
   if (code === "BROWSER_AGENT_DISABLED") return 404;
   if (["SHOPPING_TASK_NOT_FOUND", "CANDIDATE_NOT_FOUND"].includes(code)) return 404;
-  if (["INSTALLATION_NOT_AUTHORIZED", "EXECUTION_GRANT_INVALID"].includes(code)) return 403;
-  if (["TASK_STATE_INVALID", "CONFIRMATION_REQUIRED", "CANDIDATE_COUNT_INVALID", "DOMAIN_MISMATCH"].includes(code)) return 409;
+  if (["INSTALLATION_NOT_AUTHORIZED", "EXECUTION_GRANT_INVALID", "APPROVAL_REDIRECT_INVALID"].includes(code)) return 403;
+  if (["TASK_STATE_INVALID", "CONFIRMATION_REQUIRED", "CANDIDATE_COUNT_INVALID", "DOMAIN_MISMATCH", "APPROVAL_CONTINUATION_INVALID"].includes(code)) return 409;
   return null;
 }
 function browserErrorMessage(code: string): string {
@@ -221,6 +224,8 @@ function browserErrorMessage(code: string): string {
     CONFIRMATION_REQUIRED: "Approve the exact Purchase Seal with your passkey first.",
     CANDIDATE_COUNT_INVALID: "SpendSeal accepts between one and three candidates.",
     DOMAIN_MISMATCH: "The observed page does not belong to the Shopping Task's exact approved site.",
+    APPROVAL_REDIRECT_INVALID: "The approval return address does not belong to this Chromium extension.",
+    APPROVAL_CONTINUATION_INVALID: "The automatic approval return expired or was already used.",
   };
   return messages[code] ?? "SpendSeal refused the browser action.";
 }

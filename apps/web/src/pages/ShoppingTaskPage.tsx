@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { startAuthentication } from "@simplewebauthn/browser";
 import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import { CheckCircle2, Fingerprint, ShieldCheck } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, dateTime, money, shortId } from "../api";
 import { Badge, Constraint, ErrorNotice, Reveal } from "../components";
 import type { ShoppingTaskResponse } from "../types";
@@ -15,6 +15,8 @@ type AuthenticationOptions = {
 export function ShoppingTaskPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const continuationId = searchParams.get("continuation");
   const [data, setData] = useState<ShoppingTaskResponse | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -46,6 +48,11 @@ export function ShoppingTaskPage() {
         method: "POST",
         body: JSON.stringify({ challengeId: start.challengeId, response }),
       });
+      if (continuationId) {
+        const completed = await api<{ redirectUrl: string }>(`/api/v1/shopping-tasks/${id}/approval-continuations/${continuationId}/complete`, { method: "POST" });
+        window.location.assign(completed.redirectUrl);
+        return;
+      }
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Passkey approval failed");
@@ -63,6 +70,18 @@ export function ShoppingTaskPage() {
   const observed = permit?.checkoutSnapshot;
   const approved = task.status === "approved";
   const prepared = task.status === "prepared";
+
+  async function returnToExtension() {
+    if (!continuationId) return;
+    setBusy(true); setError("");
+    try {
+      const completed = await api<{ redirectUrl: string }>(`/api/v1/shopping-tasks/${id}/approval-continuations/${continuationId}/complete`, { method: "POST" });
+      window.location.assign(completed.redirectUrl);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not return to the extension");
+      setBusy(false);
+    }
+  }
 
   return <div className="route-stage max-w-3xl">
     <div className="route-glow" />
@@ -94,10 +113,16 @@ export function ShoppingTaskPage() {
           <Constraint label="Seller" value={observed?.seller ?? "Not stated"} />
           <Constraint label="Variant" value={observed?.variant ?? "No substitution"} />
           <Constraint label="Quantity" value={observed?.quantity ?? 1} />
+          <Constraint label="Items" value={observed ? money(observed.itemSubtotalPaise) : "Waiting"} />
+          <Constraint label="Delivery charge" value={observed ? money(observed.shippingPaise) : "Waiting"} />
+          <Constraint label="Taxes" value={observed ? money(observed.taxPaise) : "Waiting"} />
+          <Constraint label="Discount" value={observed ? money(observed.discountPaise) : "Waiting"} />
           <Constraint label="Complete payable total" value={<strong className="text-mint">{observed ? money(observed.finalTotalPaise) : "Waiting"}</strong>} />
           <Constraint label="Maximum allowed" value={money(task.maxTotalPaise)} />
-          <Constraint label="Delivery" value={observed?.maskedAddressLabel ?? "Address remains local/masked"} />
-          <Constraint label="Payment method" value={observed?.paymentMethodType ?? "Not stored"} />
+          <Constraint label="Delivery address" value={observed?.maskedAddressLabel ?? "Address remains local/masked"} />
+          <Constraint label="Delivery date" value={observed?.deliveryDate ?? "Not observed"} />
+          <Constraint label="Payment choice" value={task.paymentPreference === "cash_on_delivery" ? "Cash on Delivery" : task.paymentPreference === "online" ? "Online payment" : "Not selected"} />
+          <Constraint label="Payment method" value={observed?.paymentMethodType?.replaceAll("_", " ") ?? "Not stored"} />
           <Constraint label="Observation expires" value={dateTime(permit?.expiresAt ?? task.expiresAt)} />
           <Constraint label="Evidence" value={<span className="max-w-64 text-right text-xs">
             browser_observed · {observed?.adapterId ?? task.site} v{observed?.adapterVersion ?? "1"}<br />
@@ -112,8 +137,10 @@ export function ShoppingTaskPage() {
             <CheckCircle2 className="mr-2 inline" size={17} />PURCHASE_PREPARED. No live order was submitted.
           </div> : task.status === "pending_approval" ? <button onClick={approve} disabled={busy} className="button-primary w-full">
             <Fingerprint size={17} />{busy ? "Verifying passkey…" : "Approve exact Purchase Seal"}
+          </button> : approved && continuationId ? <button onClick={returnToExtension} disabled={busy} className="button-primary w-full">
+            <CheckCircle2 size={17} />{busy ? "Returning…" : "Return securely to SpendSeal"}
           </button> : approved ? <div className="rounded-xl border border-mint/20 bg-mint/[.07] p-4 text-sm text-mint">
-            Approved. Return to the extension and click “Re-check and prepare purchase.”
+            Approved. SpendSeal will re-check the visible checkout before continuing.
           </div> : <div className="rounded-xl border border-white/10 p-4 text-sm text-white/50">
             Continue in the SpendSeal extension to select a product and collect final checkout evidence.
           </div>}

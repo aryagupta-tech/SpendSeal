@@ -23,5 +23,13 @@ button { width: 100%; padding: 13px; border: 0; border-radius: 12px; background:
 #actions { display: grid; gap: 10px; margin-top: 12px; }
 .ranking-note { margin: 0; padding: 12px; border: 1px solid #29483d; border-radius: 12px; background: #0a1914; }
 .candidate .rank { display: inline-block; margin-bottom: 8px; }
+button.secondary { border: 1px solid #3c6657; background: #10231c; color: #dff8ec; }
+.choice { display: grid; gap: 10px; padding: 14px; border: 1px solid #376a58; border-radius: 14px; background: #0a1b15; }
+.choice p { margin: 0 0 4px; }
+.progress { display: flex; align-items: center; gap: 9px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #1e332b; color: #b9cdc4; font-size: 12px; }
+.progress i { width: 9px; height: 9px; border-radius: 50%; background: #70edbd; box-shadow: 0 0 0 5px rgba(112,237,189,.09); }
+.troubleshooting { padding: 11px 12px; border: 1px solid #233e34; border-radius: 12px; color: #8da098; font-size: 12px; }
+.troubleshooting summary { cursor: pointer; }
+.troubleshooting .quiet { margin-top: 8px; }
 #actions a { padding: 13px; border-radius: 12px; background: #70edbd; color: #04100c; text-align: center; font-weight: 750; text-decoration: none; }
 footer { margin-top: 28px; border-top: 1px solid #1e332b; padding-top: 16px; }

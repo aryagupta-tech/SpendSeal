@@ -113,6 +113,7 @@ export const shoppingTasks = pgTable("shopping_tasks", {
   maxTotalPaise: integer("max_total_paise").notNull(), requireRefundable: boolean("require_refundable").notNull().default(false), minimumReturnWindowDays: integer("minimum_return_window_days"), latestDeliveryDate: date("latest_delivery_date", { mode: "string" }),
   quantity: integer("quantity").notNull().default(1), currency: text("currency").notNull().default("INR"), status: text("status").notNull(), selectedCandidateId: uuid("selected_candidate_id"), purchasePermitId: uuid("purchase_permit_id"),
   checkoutSnapshotHash: text("checkout_snapshot_hash"), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), denialReason: text("denial_reason"), mode: text("mode").notNull().default("prepare_only"), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), createdAt: createdAt(), updatedAt: updatedAt(),
+  paymentPreference: text("payment_preference"),
 }, (table) => [index("shopping_tasks_buyer_status_idx").on(table.buyerId, table.status, table.createdAt)]);
 
 export const shoppingCandidates = pgTable("shopping_candidates", {
@@ -134,6 +135,12 @@ export const browserObservations = pgTable("browser_observations", {
 export const browserExecutionAttempts = pgTable("browser_execution_attempts", {
   id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id).unique(), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id), grantTokenHash: text("grant_token_hash").unique(), grantExpiresAt: timestamp("grant_expires_at", { withTimezone: true, mode: "string" }), status: text("status").notNull(), outcome: jsonb("outcome_json"), createdAt: createdAt(), updatedAt: updatedAt(),
 });
+
+export const browserApprovalContinuations = pgTable("browser_approval_continuations", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id),
+  redirectUri: text("redirect_uri").notNull(), state: text("state").notNull(), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
+}, (table) => [index("browser_approval_continuations_task_idx").on(table.taskId, table.expiresAt)]);
 
 export const shoppingAuditChainHeads = pgTable("shopping_audit_chain_heads", {
   taskId: uuid("task_id").primaryKey().references(() => shoppingTasks.id), sequence: integer("sequence").notNull().default(0), hash: text("hash").notNull().default("GENESIS"),

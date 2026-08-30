@@ -9,6 +9,7 @@ export const BROWSER_SCOPES = ["browser:tasks:read", "browser:observations:write
 export const SHOPPING_SITES = ["amazon_in", "flipkart_in"] as const;
 export const SHOPPING_TASK_STATUSES = [
   "created", "waiting_for_extension", "searching", "selection_required", "navigating", "checkout_observed", "pending_approval",
+  "checkout_configuring", "payment_choice_required", "payment_action_required",
   "approved", "policy_check", "prepared", "submitting", "completed", "user_action_required", "denied", "reconciliation_required", "failed", "expired",
 ] as const;
 
@@ -59,7 +60,7 @@ export const REASON_CODES = [
   "PAYMENT_PROVIDER_UNCERTAIN", "AUTH_REQUIRED", "TENANT_ACCESS_DENIED", "PRODUCT_VERSION_CONFLICT", "PAYMENT_CONFIG_MISSING",
   "CATALOG_REFRESH_FAILED", "SITE_NOT_SUPPORTED", "DOMAIN_MISMATCH", "CHECKOUT_UNVERIFIABLE", "PRODUCT_CHANGED", "VARIANT_CHANGED",
   "SELLER_CHANGED", "QUANTITY_CHANGED", "TOTAL_CHANGED", "UNEXPECTED_CART_ITEMS", "USER_ACTION_REQUIRED", "AUTOMATION_BLOCKED",
-  "LIVE_PURCHASE_DISABLED",
+  "LIVE_PURCHASE_DISABLED", "ADDRESS_CHANGED", "DELIVERY_CHANGED", "PAYMENT_METHOD_CHANGED", "PAYMENT_OPTION_UNAVAILABLE",
 ] as const;
 export const ReasonCodeSchema = z.enum(REASON_CODES);
 export type ReasonCode = z.infer<typeof ReasonCodeSchema>;
@@ -91,6 +92,8 @@ export type PaymentOrder = z.infer<typeof PaymentOrderSchema>;
 
 export const ShoppingSiteSchema = z.enum(SHOPPING_SITES);
 export type ShoppingSite = z.infer<typeof ShoppingSiteSchema>;
+export const PaymentPreferenceSchema = z.enum(["cash_on_delivery", "online"]);
+export type PaymentPreference = z.infer<typeof PaymentPreferenceSchema>;
 export const ShoppingTaskStatusSchema = z.enum(SHOPPING_TASK_STATUSES);
 export type ShoppingTaskStatus = z.infer<typeof ShoppingTaskStatusSchema>;
 
@@ -128,6 +131,7 @@ export const CheckoutObservationSchema = z.object({
   discountPaise: z.number().int().nonnegative(), finalTotalPaise: z.number().int().positive(), extraCartItemCount: z.number().int().nonnegative(),
   refundable: z.boolean().nullable(), returnWindowDays: z.number().int().nonnegative().nullable(), deliveryDate: z.string().date().nullable(),
   maskedAddressLabel: z.string().max(80).nullable(), addressFingerprint: z.string().max(128).nullable(), paymentMethodType: z.string().max(40).nullable(),
+  paymentPreference: PaymentPreferenceSchema,
   observedAt: z.string().datetime(), adapterId: ShoppingSiteSchema, adapterVersion: z.string().min(1), evidenceAssurance: z.literal("browser_observed"),
 });
 export type CheckoutObservation = z.infer<typeof CheckoutObservationSchema>;
@@ -136,6 +140,7 @@ export const ShoppingTaskSchema = z.object({
   id: z.string().uuid(), buyerId: z.string().uuid(), site: ShoppingSiteSchema, query: z.string().nullable(), productUrl: z.string().url().nullable(),
   maxTotalPaise: z.number().int().positive(), requireRefundable: z.boolean(), minimumReturnWindowDays: z.number().int().nonnegative().nullable(),
   latestDeliveryDate: z.string().date().nullable(), quantity: z.literal(1), currency: z.literal("INR"), status: ShoppingTaskStatusSchema,
+  paymentPreference: PaymentPreferenceSchema.nullable(),
   selectedCandidateId: z.string().uuid().nullable(), purchasePermitId: z.string().uuid().nullable(), checkoutSnapshotHash: z.string().nullable(),
   confirmedAt: z.string().datetime().nullable(), denialReason: ReasonCodeSchema.nullable(), mode: z.enum(["prepare_only", "live"]),
   expiresAt: z.string().datetime(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),

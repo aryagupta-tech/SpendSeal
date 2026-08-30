@@ -153,6 +153,7 @@ describe("PostgreSQL tenant and payment invariants", () => {
       adapterVersion: "1.0.0",
     }]);
     await browserAgent.selectCandidate(task.id, buyer.id, candidates[0]!.id);
+    await browserAgent.setPaymentPreference(task.id, buyer.id, installationId, "online");
     const observation = {
       site: "amazon_in" as const,
       sourceUrl: "https://www.amazon.in/gp/buy/spc",
@@ -172,10 +173,11 @@ describe("PostgreSQL tenant and payment invariants", () => {
       extraCartItemCount: 0,
       refundable: null,
       returnWindowDays: null,
-      deliveryDate: null,
+      deliveryDate: new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10),
       maskedAddressLabel: "PIN ••••01",
       addressFingerprint: "address-fingerprint",
-      paymentMethodType: "saved_card",
+      paymentPreference: "online" as const,
+      paymentMethodType: "card",
       observedAt: new Date().toISOString(),
       adapterId: "amazon_in" as const,
       adapterVersion: "1.0.0",
@@ -194,6 +196,14 @@ describe("PostgreSQL tenant and payment invariants", () => {
     const audit = await browserAgent.audit(task.id, buyer.id);
     expect(audit.verification).toMatchObject({ valid: true, brokenAt: null });
     expect(audit.events.map((event) => event.eventType)).toEqual(expect.arrayContaining(["PURCHASE_PREPARED", "REPLAY_BLOCKED"]));
+  });
+
+  it("enables live task mode only for the explicit owner allowlist", async () => {
+    const owner = await user("browser-live-owner"); const other = await user("browser-prepare-only");
+    const controlled = new BrowserAgentService(pool, true, true, [owner.id]);
+    const input = { site: "flipkart_in" as const, query: "wireless mouse", maxTotalPaise: 100_000, requireRefundable: false, minimumReturnWindowDays: null, latestDeliveryDate: null, expiresInMinutes: 10 };
+    expect((await controlled.createTask(owner.id, input)).mode).toBe("live");
+    expect((await controlled.createTask(other.id, input)).mode).toBe("prepare_only");
   });
 
   it("rejects audit mutation and detects offline tampering", async () => {

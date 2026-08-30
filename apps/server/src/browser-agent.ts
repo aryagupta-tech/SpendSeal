@@ -14,6 +14,7 @@ import {
   type BrowserPurchasePermit,
   type CheckoutObservation,
   type CreateShoppingTaskInput,
+  type PaymentPreference,
   type ReasonCode,
   type ShoppingCandidate,
   type ShoppingTask,
@@ -33,8 +34,10 @@ export type BrowserExecutionResult = {
 };
 
 export class BrowserAgentService {
-  constructor(private readonly pool: Pool, private readonly livePurchaseEnabled = false, private readonly enabled = true) {}
+  private readonly liveBuyerIds: Set<string>;
+  constructor(private readonly pool: Pool, private readonly livePurchaseEnabled = false, private readonly enabled = true, liveBuyerIds: string[] = []) { this.liveBuyerIds = new Set(liveBuyerIds); }
   get liveModeEnabled(): boolean { return this.enabled && this.livePurchaseEnabled; }
+  liveModeEnabledFor(buyerId: string): boolean { return this.liveModeEnabled && this.liveBuyerIds.has(buyerId); }
 
   async createTask(buyerId: string, raw: CreateShoppingTaskInput): Promise<ShoppingTask> {
     this.ensureEnabled();
@@ -42,7 +45,7 @@ export class BrowserAgentService {
     return transaction(this.pool, async (client) => {
       const id = randomUUID();
       const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
-      const mode = this.livePurchaseEnabled ? "live" : "prepare_only";
+      const mode = this.liveModeEnabledFor(buyerId) ? "live" : "prepare_only";
       const result = await client.query(`INSERT INTO shopping_tasks(id,buyer_id,site,query,product_url,max_total_paise,require_refundable,minimum_return_window_days,latest_delivery_date,status,mode,expires_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'waiting_for_extension',$10,$11) RETURNING *`,
       [id, buyerId, input.site, input.query ?? null, input.productUrl ?? null, input.maxTotalPaise, input.requireRefundable, input.minimumReturnWindowDays, input.latestDeliveryDate, mode, expiresAt]);
@@ -129,7 +132,19 @@ export class BrowserAgentService {
     });
   }
 
-  async reportStatus(taskId: string, buyerId: string, installationId: string, status: "searching" | "navigating" | "user_action_required" | "failed", detail?: string): Promise<void> {
+  async setPaymentPreference(taskId: string, buyerId: string, installationId: string, paymentPreference: PaymentPreference): Promise<ShoppingTask> {
+    this.ensureEnabled();
+    return transaction(this.pool, async (client) => {
+      const task = await this.lockTask(client, taskId, buyerId); await this.assertInstallation(client, installationId, buyerId);
+      if (!task.selectedCandidateId || !["navigating", "checkout_configuring", "payment_choice_required", "payment_action_required"].includes(task.status)) throw new Error("TASK_STATE_INVALID");
+      const status = paymentPreference === "online" ? "payment_action_required" : "checkout_configuring";
+      const result = await client.query("UPDATE shopping_tasks SET payment_preference=$2,status=$3,updated_at=now() WHERE id=$1 RETURNING *", [taskId, paymentPreference, status]);
+      await this.appendAudit(client, taskId, buyerId, "PAYMENT_PREFERENCE_SELECTED", "buyer", null, { paymentPreference });
+      return mapTask(result.rows[0]);
+    });
+  }
+
+  async reportStatus(taskId: string, buyerId: string, installationId: string, status: "searching" | "navigating" | "checkout_configuring" | "payment_choice_required" | "payment_action_required" | "user_action_required" | "failed", detail?: string): Promise<void> {
     this.ensureEnabled();
     await transaction(this.pool, async (client) => {
       await this.lockTask(client, taskId, buyerId); await this.assertInstallation(client, installationId, buyerId);
@@ -143,7 +158,7 @@ export class BrowserAgentService {
     const observation = CheckoutObservationSchema.parse(raw);
     return transaction(this.pool, async (client) => {
       const task = await this.lockTask(client, taskId, buyerId); await this.assertInstallation(client, installationId, buyerId);
-      if (!task.selectedCandidateId || !["navigating", "checkout_observed", "pending_approval"].includes(task.status)) throw new Error("TASK_STATE_INVALID");
+      if (!task.selectedCandidateId || !["navigating", "checkout_configuring", "payment_action_required", "checkout_observed", "pending_approval"].includes(task.status)) throw new Error("TASK_STATE_INVALID");
       const candidateResult = await client.query("SELECT * FROM shopping_candidates WHERE id=$1 AND task_id=$2", [task.selectedCandidateId, taskId]);
       const candidate = candidateResult.rows[0] ? mapCandidate(candidateResult.rows[0]) : null;
       const decision = evaluateBrowserCheckout({ task, candidate, observation }); const snapshotHash = checkoutSnapshotHash(observation);
@@ -167,6 +182,34 @@ export class BrowserAgentService {
     });
   }
 
+  async createApprovalContinuation(taskId: string, buyerId: string, installationId: string, input: { redirectUri: string; state: string }): Promise<{ continuationId: string; expiresAt: string }> {
+    this.ensureEnabled();
+    if (!/^https:\/\/[a-p]{32}\.chromiumapp\.org\/shopping-approval\/?$/.test(input.redirectUri)) throw new Error("APPROVAL_REDIRECT_INVALID");
+    return transaction(this.pool, async (client) => {
+      const task = await this.lockTask(client, taskId, buyerId); await this.assertInstallation(client, installationId, buyerId);
+      if (task.status !== "pending_approval") throw new Error("TASK_STATE_INVALID");
+      const continuationId = randomUUID(); const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+      await client.query("DELETE FROM browser_approval_continuations WHERE task_id=$1 AND consumed_at IS NULL", [taskId]);
+      await client.query("INSERT INTO browser_approval_continuations(id,task_id,installation_id,redirect_uri,state,expires_at) VALUES($1,$2,$3,$4,$5,$6)", [continuationId, taskId, installationId, input.redirectUri, input.state, expiresAt]);
+      await this.appendAudit(client, taskId, buyerId, "APPROVAL_CONTINUATION_CREATED", "browser_extension", null, { installationId, expiresAt });
+      return { continuationId, expiresAt };
+    });
+  }
+
+  async completeApprovalContinuation(taskId: string, buyerId: string, continuationId: string): Promise<{ redirectUrl: string }> {
+    this.ensureEnabled();
+    return transaction(this.pool, async (client) => {
+      const task = await this.lockTask(client, taskId, buyerId);
+      if (task.status !== "approved") throw new Error("CONFIRMATION_REQUIRED");
+      const result = await client.query("SELECT * FROM browser_approval_continuations WHERE id=$1 AND task_id=$2 AND consumed_at IS NULL AND expires_at>now() FOR UPDATE", [continuationId, taskId]);
+      const continuation = result.rows[0]; if (!continuation) throw new Error("APPROVAL_CONTINUATION_INVALID");
+      await client.query("UPDATE browser_approval_continuations SET consumed_at=now() WHERE id=$1", [continuationId]);
+      const redirect = new URL(continuation.redirect_uri); redirect.searchParams.set("state", continuation.state); redirect.searchParams.set("result", "approved"); redirect.searchParams.set("task_id", taskId);
+      await this.appendAudit(client, taskId, buyerId, "APPROVAL_RETURNED_TO_EXTENSION", "system", null, { installationId: continuation.installation_id });
+      return { redirectUrl: redirect.toString() };
+    });
+  }
+
   async approve(taskId: string, buyerId: string): Promise<ShoppingTask> {
     this.ensureEnabled();
     return transaction(this.pool, async (client) => {
@@ -181,7 +224,7 @@ export class BrowserAgentService {
     });
   }
 
-  async claimExecution(taskId: string, buyerId: string, installationId: string, raw: unknown): Promise<{ status: "prepared" | "submitting" | "denied"; reason?: ReasonCode; executionGrant?: string }> {
+  async claimExecution(taskId: string, buyerId: string, installationId: string, raw: unknown): Promise<{ status: "prepared" | "submitting" | "denied"; reason?: ReasonCode; executionGrant?: string; paymentPreference?: PaymentPreference }> {
     this.ensureEnabled();
     const observation = CheckoutObservationSchema.parse(raw);
     return transaction(this.pool, async (client) => {
@@ -205,6 +248,7 @@ export class BrowserAgentService {
         return { status: "denied", reason };
       }
       await this.appendAudit(client, taskId, buyerId, "POLICY_ALLOWED", "policy_engine", null, { checkoutSnapshotHash: checkoutSnapshotHash(observation), finalTotalPaise: observation.finalTotalPaise }, observation.adapterId, observation.adapterVersion);
+      await this.appendAudit(client, taskId, buyerId, "FINAL_REVALIDATION_PASSED", "policy_engine", null, { paymentPreference: task.paymentPreference, maskedPaymentMethodType: observation.paymentMethodType, checkoutSnapshotHash: checkoutSnapshotHash(observation) }, observation.adapterId, observation.adapterVersion);
       const attemptId = randomUUID();
       if (task.mode === "prepare_only") {
         await client.query("INSERT INTO browser_execution_attempts(id,task_id,installation_id,status,outcome_json) VALUES($1,$2,$3,'prepared',$4)", [attemptId, taskId, installationId, { submitted: false, reason: "showcase_prepare_only" }]);
@@ -213,7 +257,7 @@ export class BrowserAgentService {
         await this.appendAudit(client, taskId, buyerId, "PURCHASE_PREPARED", "browser_extension", null, { liveOrderSubmitted: false }, observation.adapterId, observation.adapterVersion, "prepared_only");
         return { status: "prepared" };
       }
-      if (!this.livePurchaseEnabled) {
+      if (!this.liveModeEnabledFor(buyerId)) {
         await this.appendAudit(client, taskId, buyerId, "POLICY_DENIED", "policy_engine", "LIVE_PURCHASE_DISABLED", { liveOrderSubmitted: false }, observation.adapterId, observation.adapterVersion);
         return { status: "denied", reason: "LIVE_PURCHASE_DISABLED" };
       }
@@ -221,7 +265,7 @@ export class BrowserAgentService {
       await client.query("INSERT INTO browser_execution_attempts(id,task_id,installation_id,grant_token_hash,grant_expires_at,status) VALUES($1,$2,$3,$4,now()+interval '2 minutes','claimed')", [attemptId, taskId, installationId, sha256(grant)]);
       await client.query("UPDATE shopping_tasks SET status='submitting',updated_at=now() WHERE id=$1", [taskId]);
       await client.query("UPDATE browser_purchase_permits SET status='submitting' WHERE id=$1", [permit.id]);
-      return { status: "submitting", executionGrant: grant };
+      return { status: "submitting", executionGrant: grant, paymentPreference: task.paymentPreference ?? undefined };
     });
   }
 
@@ -318,7 +362,7 @@ export class BrowserAgentService {
   }
 }
 
-function mapTask(row: any): ShoppingTask { return ShoppingTaskSchema.parse({ id: row.id, buyerId: row.buyer_id, site: row.site, query: row.query, productUrl: row.product_url, maxTotalPaise: row.max_total_paise, requireRefundable: row.require_refundable, minimumReturnWindowDays: row.minimum_return_window_days, latestDeliveryDate: row.latest_delivery_date, quantity: row.quantity, currency: row.currency, status: row.status, selectedCandidateId: row.selected_candidate_id, purchasePermitId: row.purchase_permit_id, checkoutSnapshotHash: row.checkout_snapshot_hash, confirmedAt: iso(row.confirmed_at), denialReason: row.denial_reason, mode: row.mode, expiresAt: iso(row.expires_at), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }); }
+function mapTask(row: any): ShoppingTask { return ShoppingTaskSchema.parse({ id: row.id, buyerId: row.buyer_id, site: row.site, query: row.query, productUrl: row.product_url, maxTotalPaise: row.max_total_paise, requireRefundable: row.require_refundable, minimumReturnWindowDays: row.minimum_return_window_days, latestDeliveryDate: row.latest_delivery_date, quantity: row.quantity, currency: row.currency, status: row.status, paymentPreference: row.payment_preference, selectedCandidateId: row.selected_candidate_id, purchasePermitId: row.purchase_permit_id, checkoutSnapshotHash: row.checkout_snapshot_hash, confirmedAt: iso(row.confirmed_at), denialReason: row.denial_reason, mode: row.mode, expiresAt: iso(row.expires_at), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at) }); }
 function mapCandidate(row: any): ShoppingCandidate { return ShoppingCandidateSchema.parse({ id: row.id, taskId: row.task_id, canonicalProductId: row.canonical_product_id, listingId: row.listing_id, title: row.title, seller: row.seller, variant: row.variant, condition: row.condition, availability: row.availability, pricePaise: row.price_paise, currency: row.currency, productUrl: row.product_url, snapshotHash: row.snapshot_hash, observedAt: iso(row.observed_at), adapterId: row.adapter_id, adapterVersion: row.adapter_version, selected: row.selected }); }
 function mapPermit(row: any): BrowserPurchasePermit { return BrowserPurchasePermitSchema.parse({ id: row.id, taskId: row.task_id, buyerId: row.buyer_id, checkoutSnapshot: row.checkout_snapshot_json, checkoutSnapshotHash: row.checkout_snapshot_hash, maxTotalPaise: row.max_total_paise, status: row.status, confirmedAt: iso(row.confirmed_at), expiresAt: iso(row.expires_at), idempotencyKey: row.idempotency_key, createdAt: iso(row.created_at) }); }
 function mapAudit(row: any): ShoppingAuditEvent { return { id: row.id, taskId: row.task_id, buyerId: row.buyer_id, sequence: row.sequence, eventType: row.event_type, actor: row.actor, reasonCode: row.reason_code, adapterId: row.adapter_id, adapterVersion: row.adapter_version, evidenceAssurance: row.evidence_assurance, payload: row.payload_json, previousHash: row.previous_hash, hash: row.hash, createdAt: iso(row.created_at)! }; }
