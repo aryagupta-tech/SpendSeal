@@ -6,7 +6,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { z } from "zod";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
-import { API_KEY_SCOPES, CreateIntentInputSchema, MCP_SCOPES, sha256 } from "@spendseal/core";
+import { API_KEY_SCOPES, BROWSER_SCOPES, CreateIntentInputSchema, CreateShoppingTaskInputSchema, MCP_SCOPES, sha256 } from "@spendseal/core";
 import type { Config } from "./config.js";
 import { handleMcpRequest } from "./mcp.js";
 import { OAuthService } from "./oauth.js";
@@ -15,13 +15,14 @@ import { SpendSealError, SpendSealService } from "./service.js";
 import { SpendSealStore, type SessionPrincipal } from "./store.js";
 import { SpendSealWebAuthn } from "./webauthn.js";
 import { seedNovaDesk } from "./demo.js";
+import { BrowserAgentService, type BrowserPrincipal } from "./browser-agent.js";
 
 export function createApp(config: Config, store: SpendSealStore) {
-  const service = new SpendSealService(store, config); const webauthn = new SpendSealWebAuthn(store, config); const oauth = new OAuthService(store, config); const app = express();
+  const service = new SpendSealService(store, config); const browserAgent = new BrowserAgentService(store.pool, config.browserLivePurchaseEnabled, config.browserAgentEnabled); const webauthn = new SpendSealWebAuthn(store, config, browserAgent); const oauth = new OAuthService(store, config); const app = express();
   app.disable("x-powered-by"); app.set("trust proxy", 1);
   app.use((req, res, next) => { const id = String(req.header("x-request-id") ?? randomUUID()); res.setHeader("x-request-id", id); res.locals.requestId = id; const started = Date.now(); res.on("finish", () => console.log(JSON.stringify({ level: "info", event: "http_request", requestId: id, method: req.method, path: req.path, status: res.statusCode, durationMs: Date.now() - started }))); next(); });
   app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-  app.use(cors({ origin: config.webauthnOrigin, credentials: true, methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] }));
+  app.use(cors({ origin(origin, callback) { callback(null, !origin || origin === config.webauthnOrigin || origin.startsWith("chrome-extension://")); }, credentials: true, methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] }));
 
   app.post("/api/webhooks/razorpay/:merchantId", express.raw({ type: "application/json", limit: "256kb" }), asyncHandler(async (req, res) => {
     const merchantId = z.string().uuid().parse(req.params.merchantId); const paymentConfig = await store.paymentConfig(merchantId);
@@ -108,19 +109,60 @@ export function createApp(config: Config, store: SpendSealStore) {
   app.post("/api/v1/payments/verify", requireBrowser, requireCsrf, asyncHandler(async (req, res) => { const input = z.object({ localOrderId: z.string().uuid(), razorpayOrderId: z.string(), razorpayPaymentId: z.string(), razorpaySignature: z.string() }).parse(req.body); const order = await store.getOrder(input.localOrderId); if (!order || order.buyerId !== principal(res).user.id) throw new SpendSealError(403, "TENANT_ACCESS_DENIED", "Payment belongs to another buyer."); res.json({ order: await service.verifyPayment(input) }); }));
   app.post("/api/v1/payments/mock-complete", requireBrowser, requireCsrf, asyncHandler(async (req, res) => { const id = z.object({ localOrderId: z.string().uuid() }).parse(req.body).localOrderId; const order = await store.getOrder(id); if (!order || order.buyerId !== principal(res).user.id) throw new SpendSealError(403, "TENANT_ACCESS_DENIED", "Payment belongs to another buyer."); res.json({ order: await service.completeMockPayment(id) }); }));
 
+  app.get("/api/v1/shopping-tasks", requireBrowser, asyncHandler(async (_req, res) => res.json({ tasks: await browserAgent.listTasks(principal(res).user.id) })));
+  app.post("/api/v1/shopping-tasks", requireBrowser, requireCsrf, limit(store, "shopping_create", 30, 60), asyncHandler(async (req, res) => res.status(201).json({ task: await browserAgent.createTask(principal(res).user.id, CreateShoppingTaskInputSchema.parse(req.body)) })));
+  app.get("/api/v1/shopping-tasks/:id", requireBrowser, asyncHandler(async (req, res) => res.json(await browserAgent.getTask(uuidParam(req.params.id), principal(res).user.id))));
+  app.get("/api/v1/shopping-tasks/:id/audit", requireBrowser, asyncHandler(async (req, res) => res.json(await browserAgent.audit(uuidParam(req.params.id), principal(res).user.id))));
+  app.post("/api/v1/shopping-tasks/:id/approval/options", requireBrowser, requireCsrf, asyncHandler(async (req, res) => res.json(await webauthn.shoppingApprovalOptions(uuidParam(req.params.id), principal(res).user.id))));
+  app.post("/api/v1/shopping-tasks/:id/approve", requireBrowser, requireCsrf, asyncHandler(async (req, res) => { const input = z.object({ challengeId: z.string().uuid(), response: z.unknown() }).parse(req.body); res.json({ task: await webauthn.approveShoppingTask(uuidParam(req.params.id), principal(res).user.id, input.challengeId, input.response as AuthenticationResponseJSON), approvalMethod: "passkey" }); }));
+
+  app.post("/api/v1/browser/installations", limit(store, "browser_installation", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const input = z.object({ installationId: z.string().uuid(), name: z.string().min(1).max(80) }).parse(req.body); await browserAgent.registerInstallation(extension, input); res.status(201).json({ registered: true, livePurchaseEnabled: config.browserLivePurchaseEnabled }); }));
+  app.delete("/api/v1/browser/installations/:id", limit(store, "browser_installation", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json({ revoked: await browserAgent.revokeInstallation(extension.userId, uuidParam(req.params.id)) }); }));
+  app.get("/api/v1/browser/tasks/pending", limit(store, "browser_read", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json({ tasks: await browserAgent.listTasks(extension.userId, true) }); }));
+  app.get("/api/v1/browser/tasks/:id", limit(store, "browser_read", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); res.json(await browserAgent.getTask(uuidParam(req.params.id), extension.userId)); }));
+  app.post("/api/v1/browser/tasks/:id/candidates", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), candidates: z.array(z.unknown()).min(1).max(3) }).parse(req.body); res.status(201).json({ candidates: await browserAgent.saveCandidates(extension.userId, input.installationId, uuidParam(req.params.id), input.candidates) }); }));
+  app.post("/api/v1/browser/tasks/:id/select", limit(store, "browser_select", 30, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:tasks:read"); const candidateId = z.object({ candidateId: z.string().uuid() }).parse(req.body).candidateId; res.json({ task: await browserAgent.selectCandidate(uuidParam(req.params.id), extension.userId, candidateId) }); }));
+  app.post("/api/v1/browser/tasks/:id/status", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), status: z.enum(["searching", "navigating", "user_action_required", "failed"]), detail: z.string().max(240).optional() }).parse(req.body); await browserAgent.reportStatus(uuidParam(req.params.id), extension.userId, input.installationId, input.status, input.detail); res.json({ recorded: true }); }));
+  app.post("/api/v1/browser/tasks/:id/checkout-observation", limit(store, "browser_observation", 120, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:observations:write"); const input = z.object({ installationId: z.string().uuid(), observation: z.unknown() }).parse(req.body); res.status(201).json(await browserAgent.observeCheckout(uuidParam(req.params.id), extension.userId, input.installationId, input.observation)); }));
+  app.post("/api/v1/browser/tasks/:id/execution-claim", limit(store, "browser_execute", 20, 60), asyncHandler(async (req, res) => { const extension = await requireExtensionPrincipal(req, oauth, "browser:execute"); const input = z.object({ installationId: z.string().uuid(), observation: z.unknown() }).parse(req.body); res.json(await browserAgent.claimExecution(uuidParam(req.params.id), extension.userId, input.installationId, input.observation)); }));
+  app.post("/api/v1/browser/tasks/:id/execution-result", limit(store, "browser_execute", 20, 60), asyncHandler(async (req, res) => {
+    const extension = await requireExtensionPrincipal(req, oauth, "browser:execute");
+    const input = z.object({
+      installationId: z.string().uuid(),
+      executionGrant: z.string().min(20).max(200),
+      status: z.enum(["completed", "user_action_required", "reconciliation_required", "failed"]),
+      detail: z.string().max(240).optional(),
+    }).parse(req.body);
+    res.json(await browserAgent.reportExecution(
+      uuidParam(req.params.id),
+      extension.userId,
+      input.installationId,
+      input,
+    ));
+  }));
+
   app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"], (_req, res) => res.json(oauth.protectedResourceMetadata()));
   app.get(["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"], (_req, res) => res.json(oauth.authorizationServerMetadata()));
   app.get("/oauth/authorize", requireBrowserRedirect, asyncHandler(async (req, res) => { const validated = oauth.validateAuthorizationRequest(queryRecord(req)); const csrf = cookie(req, "agentrail_csrf") ?? ""; res.type("html").send(consentPage(validated, csrf, principal(res).user.displayName)); }));
   app.post("/oauth/authorize", express.urlencoded({ extended: false, limit: "32kb" }), requireBrowserRedirect, requireCsrf, asyncHandler(async (req, res) => { const validated = oauth.validateAuthorizationRequest(bodyRecord(req)); res.redirect(303, await oauth.authorize(principal(res).user.id, validated)); }));
-  app.post("/oauth/token", express.urlencoded({ extended: false, limit: "32kb" }), asyncHandler(async (req, res) => { const body = bodyRecord(req); if (body.grant_type === "authorization_code") res.json(await oauth.exchangeCode({ code: required(body.code), codeVerifier: required(body.code_verifier), clientId: required(body.client_id), redirectUri: required(body.redirect_uri), resource: required(body.resource) })); else if (body.grant_type === "refresh_token") res.json(await oauth.refresh({ refreshToken: required(body.refresh_token), clientId: required(body.client_id), resource: required(body.resource) })); else throw new SpendSealError(400, "unsupported_grant_type", "Only authorization_code and refresh_token grants are supported."); }));
+  app.post("/oauth/token", express.urlencoded({ extended: false, limit: "32kb" }), limit(store, "oauth_token", 30, 60), asyncHandler(async (req, res) => { const body = bodyRecord(req); if (body.grant_type === "authorization_code") res.json(await oauth.exchangeCode({ code: required(body.code), codeVerifier: required(body.code_verifier), clientId: required(body.client_id), redirectUri: required(body.redirect_uri), resource: required(body.resource) })); else if (body.grant_type === "refresh_token") res.json(await oauth.refresh({ refreshToken: required(body.refresh_token), clientId: required(body.client_id), resource: required(body.resource) })); else throw new SpendSealError(400, "unsupported_grant_type", "Only authorization_code and refresh_token grants are supported."); }));
   app.post("/oauth/revoke", express.urlencoded({ extended: false, limit: "32kb" }), asyncHandler(async (req, res) => { await oauth.revoke(required(bodyRecord(req).token)); res.status(200).end(); }));
 
-  app.post("/mcp", limit(store, "mcp", 120, 60), asyncHandler(async (req, res) => { const token = bearer(req); const principal = token ? await oauth.authenticate(token) : null; if (!principal || principal.resource !== config.publicBaseUrl) { res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource", scope="${MCP_SCOPES.join(" ")}"`); res.status(401).json({ error: "invalid_token" }); return; } await handleMcpRequest(service, store, principal, req, res); }));
+  app.post("/mcp", limit(store, "mcp", 120, 60), asyncHandler(async (req, res) => { const token = bearer(req); const principal = token ? await oauth.authenticate(token) : null; if (!principal || principal.resource !== config.publicBaseUrl) { res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource", scope="${MCP_SCOPES.join(" ")}"`); res.status(401).json({ error: "invalid_token" }); return; } await handleMcpRequest(service, store, browserAgent, principal, req, res); }));
   app.get("/mcp", (_req, res) => res.status(405).json({ error: "Streamable HTTP accepts POST requests." }));
 
   const webDist = resolveWebDist(); app.use(express.static(webDist)); app.use((req, res, next) => { if (req.method === "GET" && !req.path.startsWith("/api/") && req.path !== "/mcp" && !req.path.startsWith("/.well-known/") && !req.path.startsWith("/oauth/")) res.sendFile(path.join(webDist, "index.html"), (error) => error ? next() : undefined); else next(); });
-  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => { if (error instanceof z.ZodError) { res.status(400).json({ error: { code: "INVALID_INPUT", message: "Request validation failed.", details: error.flatten() } }); return; } if (error instanceof SpendSealError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; } console.error(JSON.stringify({ level: "error", event: "request_failed", requestId: res.locals.requestId, message: error instanceof Error ? error.message : "Unknown error" })); res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "SpendSeal could not complete the request." } }); });
-  return { app, service, store, webauthn, oauth };
+  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (error instanceof z.ZodError) { res.status(400).json({ error: { code: "INVALID_INPUT", message: "Request validation failed.", details: error.flatten() } }); return; }
+    if (error instanceof SpendSealError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }
+    if (error instanceof Error && browserErrorStatus(error.message)) {
+      res.status(browserErrorStatus(error.message)!).json({ error: { code: error.message, message: browserErrorMessage(error.message) } });
+      return;
+    }
+    console.error(JSON.stringify({ level: "error", event: "request_failed", requestId: res.locals.requestId, message: error instanceof Error ? error.message : "Unknown error" }));
+    res.status(500).json({ error: { code: "INTERNAL_ERROR", message: "SpendSeal could not complete the request." } });
+  });
+  return { app, service, store, browserAgent, webauthn, oauth };
 }
 
 async function attachSession(req: Request, res: Response, store: SpendSealStore, config: Config) { const token = cookie(req, "agentrail_session"); if (token) res.locals.principal = await store.getSession(token, config.sessionIdleMinutes); }
@@ -140,6 +182,7 @@ function cookie(req: Request, name: string): string | undefined { return String(
 function approvalCookieName(id: string) { return `agentrail_approval_${id.replaceAll("-", "")}`; }
 function requireApprovalCookie(req: Request) { const value = cookie(req, approvalCookieName(String(req.params.id))); if (!value) throw new SpendSealError(403, "APPROVAL_SESSION_INVALID", "Open the original approval link first."); return decodeURIComponent(value); }
 function bearer(req: Request): string | null { const header = String(req.header("authorization") ?? ""); return header.startsWith("Bearer ") ? header.slice(7) : null; }
+async function requireExtensionPrincipal(req: Request, oauth: OAuthService, scope: typeof BROWSER_SCOPES[number]): Promise<BrowserPrincipal> { const token = bearer(req); const principal = token ? await oauth.authenticate(token, scope) : null; if (!principal || principal.clientId !== oauth.config.extensionOauthClientId || principal.resource !== oauth.config.publicBaseUrl) throw new SpendSealError(401, "AUTH_REQUIRED", `The SpendSeal extension needs ${scope}.`); return { userId: principal.userId, clientId: principal.clientId, scopes: principal.scopes }; }
 function uuidParam(value: string | string[] | undefined): string { return z.string().uuid().parse(String(value)); }
 function stringQuery(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 function numberQuery(value: unknown): number | undefined { return typeof value === "string" ? Number(value) : undefined; }
@@ -150,7 +193,37 @@ function asyncHandler(handler: (req: Request, res: Response, next: NextFunction)
 function queryRecord(req: Request): Record<string, string | undefined> { return Object.fromEntries(Object.entries(req.query).map(([key, value]) => [key, typeof value === "string" ? value : undefined])); }
 function bodyRecord(req: Request): Record<string, string | undefined> { return Object.fromEntries(Object.entries(req.body ?? {}).map(([key, value]) => [key, typeof value === "string" ? value : undefined])); }
 function required(value: string | undefined): string { if (!value) throw new SpendSealError(400, "invalid_request", "A required OAuth parameter is missing."); return value; }
-function consentPage(input: { clientId: string; redirectUri: string; resource: string; codeChallenge: string; scopes: string[]; state: string }, csrf: string, displayName: string) { const hidden = { response_type: "code", client_id: input.clientId, redirect_uri: input.redirectUri, resource: input.resource, code_challenge: input.codeChallenge, code_challenge_method: "S256", scope: input.scopes.join(" "), state: input.state, csrf_token: csrf }; return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize SpendSeal</title><style>body{font-family:system-ui;background:#07110e;color:#eefbf5;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:32px;border:1px solid #315347;border-radius:24px;background:#0b1814}button{padding:14px 20px;border:0;border-radius:12px;background:#78f0c1;color:#06110d;font-weight:700;width:100%}code{color:#78f0c1}li{margin:8px 0}</style></head><body><main class="card"><h1>Connect ChatGPT to SpendSeal</h1><p>Signed in as <strong>${escapeHtml(displayName)}</strong>. ChatGPT requests these buyer permissions:</p><ul>${input.scopes.map((scope) => `<li><code>${escapeHtml(scope)}</code></li>`).join("")}</ul><p>ChatGPT cannot approve a PurchasePermit or complete payment.</p><form method="post" action="/oauth/authorize">${Object.entries(hidden).map(([key, value]) => `<input type="hidden" name="${key}" value="${escapeHtml(value)}">`).join("")}<button type="submit">Authorize connection</button></form></main></body></html>`; }
+function consentPage(input: { clientId: string; redirectUri: string; resource: string; codeChallenge: string; scopes: string[]; state: string }, csrf: string, displayName: string) {
+  const extension = input.clientId === "spendseal-browser-extension";
+  const clientName = extension ? "SpendSeal browser extension" : "ChatGPT";
+  const limitation = extension
+    ? "The extension can observe only supported shopping pages. It cannot read passwords, raw card details, cookies, or browsing history."
+    : "ChatGPT cannot select the final listing, approve a Purchase Seal, or execute an order.";
+  const hidden = { response_type: "code", client_id: input.clientId, redirect_uri: input.redirectUri, resource: input.resource, code_challenge: input.codeChallenge, code_challenge_method: "S256", scope: input.scopes.join(" "), state: input.state, csrf_token: csrf };
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Authorize SpendSeal</title><style>body{font-family:system-ui;background:#07110e;color:#eefbf5;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:560px;padding:32px;border:1px solid #315347;border-radius:24px;background:#0b1814}button{padding:14px 20px;border:0;border-radius:12px;background:#78f0c1;color:#06110d;font-weight:700;width:100%}code{color:#78f0c1}li{margin:8px 0}</style></head><body><main class="card"><h1>Connect ${escapeHtml(clientName)} to SpendSeal</h1><p>Signed in as <strong>${escapeHtml(displayName)}</strong>. ${escapeHtml(clientName)} requests these buyer permissions:</p><ul>${input.scopes.map((scope) => `<li><code>${escapeHtml(scope)}</code></li>`).join("")}</ul><p>${escapeHtml(limitation)}</p><form method="post" action="/oauth/authorize">${Object.entries(hidden).map(([key, value]) => `<input type="hidden" name="${key}" value="${escapeHtml(value)}">`).join("")}<button type="submit">Authorize connection</button></form></main></body></html>`;
+}
+
+function browserErrorStatus(code: string): number | null {
+  if (code === "BROWSER_AGENT_DISABLED") return 404;
+  if (["SHOPPING_TASK_NOT_FOUND", "CANDIDATE_NOT_FOUND"].includes(code)) return 404;
+  if (["INSTALLATION_NOT_AUTHORIZED", "EXECUTION_GRANT_INVALID"].includes(code)) return 403;
+  if (["TASK_STATE_INVALID", "CONFIRMATION_REQUIRED", "CANDIDATE_COUNT_INVALID", "DOMAIN_MISMATCH"].includes(code)) return 409;
+  return null;
+}
+function browserErrorMessage(code: string): string {
+  const messages: Record<string, string> = {
+    BROWSER_AGENT_DISABLED: "Browser purchasing is disabled on this SpendSeal deployment.",
+    SHOPPING_TASK_NOT_FOUND: "This Shopping Task was not found for the signed-in buyer.",
+    CANDIDATE_NOT_FOUND: "The selected product candidate is no longer available.",
+    INSTALLATION_NOT_AUTHORIZED: "This browser extension installation is not authorized for the buyer.",
+    EXECUTION_GRANT_INVALID: "The execution grant is invalid, expired, or already used.",
+    TASK_STATE_INVALID: "The Shopping Task is not ready for that action.",
+    CONFIRMATION_REQUIRED: "Approve the exact Purchase Seal with your passkey first.",
+    CANDIDATE_COUNT_INVALID: "SpendSeal accepts between one and three candidates.",
+    DOMAIN_MISMATCH: "The observed page does not belong to the Shopping Task's exact approved site.",
+  };
+  return messages[code] ?? "SpendSeal refused the browser action.";
+}
 function escapeHtml(value: string) { return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!); }
 function resolveWebDist(): string { const candidates = [path.resolve(process.cwd(), "apps/web/dist"), path.resolve(process.cwd(), "../web/dist")]; return candidates.find((candidate) => path.isAbsolute(candidate) && candidate && requireDirectory(candidate)) ?? candidates[0]!; }
 function requireDirectory(candidate: string): boolean { try { return fs.statSync(candidate).isDirectory(); } catch { return false; } }

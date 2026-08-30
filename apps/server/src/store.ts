@@ -19,7 +19,7 @@ type Queryable = { query<R extends QueryResultRow = QueryResultRow>(text: string
 
 export type SessionPrincipal = { user: User; csrfHash: string; tokenHash: string };
 export type StoredPasskey = { id: string; userId: string; rpId: string; publicKey: Uint8Array; counter: number; deviceType: string; backedUp: boolean; transports: string[] };
-export type StoredChallenge = { id: string; userId: string | null; purchasePermitId: string | null; purpose: string; challenge: string; context: Record<string, unknown> };
+export type StoredChallenge = { id: string; userId: string | null; purchasePermitId: string | null; shoppingTaskId: string | null; purpose: string; challenge: string; context: Record<string, unknown> };
 export type PaymentConfiguration = { merchantId: string; adapter: "mock" | "razorpay"; keyId: string | null; keySecretCiphertext: string | null; webhookSecretCiphertext: string | null; encryptionKeyVersion: number; version: number };
 export type CatalogConnection = { merchantId: string; provider: "shopify"; shopDomain: string; accessTokenCiphertext: string; encryptionKeyVersion: number; status: "active" | "error" | "revoked"; shopName: string; currency: string; defaultRefundable: boolean; defaultRefundWindowDays: number; lastSyncAt: string | null };
 export type MerchantRole = "owner" | "admin" | "catalog_manager" | "auditor";
@@ -31,20 +31,20 @@ export class SpendSealStore {
 
   async health(): Promise<void> { await this.pool.query("SELECT 1"); }
 
-  async createChallenge(input: { userId?: string | null; purchasePermitId?: string | null; purpose: "registration" | "login" | "approval"; challenge: string; context?: Record<string, unknown> }): Promise<string> {
+  async createChallenge(input: { userId?: string | null; purchasePermitId?: string | null; shoppingTaskId?: string | null; purpose: "registration" | "login" | "approval" | "shopping_approval"; challenge: string; context?: Record<string, unknown> }): Promise<string> {
     const id = randomUUID();
-    await this.pool.query(`INSERT INTO webauthn_challenges(id,user_id,intent_lock_id,purpose,challenge,context_json,expires_at)
-      VALUES($1,$2,$3,$4,$5,$6,now()+interval '5 minutes')`, [id, input.userId ?? null, input.purchasePermitId ?? null, input.purpose, input.challenge, input.context ?? {}]);
+    await this.pool.query(`INSERT INTO webauthn_challenges(id,user_id,intent_lock_id,shopping_task_id,purpose,challenge,context_json,expires_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '5 minutes')`, [id, input.userId ?? null, input.purchasePermitId ?? null, input.shoppingTaskId ?? null, input.purpose, input.challenge, input.context ?? {}]);
     return id;
   }
 
-  async consumeChallenge(input: { id: string; purpose: string; userId?: string | null; purchasePermitId?: string | null }): Promise<StoredChallenge | null> {
+  async consumeChallenge(input: { id: string; purpose: string; userId?: string | null; purchasePermitId?: string | null; shoppingTaskId?: string | null }): Promise<StoredChallenge | null> {
     return transaction(this.pool, async (client) => {
       const found = await client.query(`SELECT * FROM webauthn_challenges WHERE id=$1 AND purpose=$2 AND consumed_at IS NULL AND expires_at>now() FOR UPDATE`, [input.id, input.purpose]);
       const row = found.rows[0];
-      if (!row || (input.userId !== undefined && row.user_id !== input.userId) || (input.purchasePermitId !== undefined && row.intent_lock_id !== input.purchasePermitId)) return null;
+      if (!row || (input.userId !== undefined && row.user_id !== input.userId) || (input.purchasePermitId !== undefined && row.intent_lock_id !== input.purchasePermitId) || (input.shoppingTaskId !== undefined && row.shopping_task_id !== input.shoppingTaskId)) return null;
       await client.query("UPDATE webauthn_challenges SET consumed_at=now() WHERE id=$1", [input.id]);
-      return { id: row.id, userId: row.user_id, purchasePermitId: row.intent_lock_id, purpose: row.purpose, challenge: row.challenge, context: row.context_json ?? {} };
+      return { id: row.id, userId: row.user_id, purchasePermitId: row.intent_lock_id, shoppingTaskId: row.shopping_task_id, purpose: row.purpose, challenge: row.challenge, context: row.context_json ?? {} };
     });
   }
 

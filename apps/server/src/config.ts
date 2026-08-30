@@ -16,6 +16,9 @@ export type Config = {
   sessionAbsoluteHours: number;
   localRazorpayKeyId: string | null;
   localRazorpayKeySecret: string | null;
+  extensionOauthClientId: string;
+  browserAgentEnabled: boolean;
+  browserLivePurchaseEnabled: boolean;
 };
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -39,6 +42,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     sessionAbsoluteHours: Number(process.env.SESSION_ABSOLUTE_HOURS ?? 8),
     localRazorpayKeyId: process.env.RAZORPAY_KEY_ID?.startsWith("rzp_test_") ? process.env.RAZORPAY_KEY_ID : null,
     localRazorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || null,
+    extensionOauthClientId: process.env.EXTENSION_OAUTH_CLIENT_ID ?? "spendseal-browser-extension",
+    browserAgentEnabled: process.env.BROWSER_AGENT_ENABLED !== "false",
+    browserLivePurchaseEnabled: process.env.BROWSER_LIVE_PURCHASE_ENABLED === "true",
     ...overrides,
   };
 }

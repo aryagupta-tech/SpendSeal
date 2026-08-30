@@ -2,13 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Request, Response } from "express";
 import { z } from "zod";
-import { PRICE_CHANGE_POLICIES } from "@spendseal/core";
+import { CreateShoppingTaskInputSchema, PRICE_CHANGE_POLICIES } from "@spendseal/core";
 import type { OAuthPrincipal } from "./oauth.js";
 import { SpendSealService } from "./service.js";
 import { SpendSealStore } from "./store.js";
+import { BrowserAgentService } from "./browser-agent.js";
 
-export async function handleMcpRequest(service: SpendSealService, store: SpendSealStore, principal: OAuthPrincipal, req: Request, res: Response): Promise<void> {
-  const server = new McpServer({ name: "spendseal", version: "1.0.0" }, { instructions: "SpendSeal is a multi-merchant authorization firewall. Discover a merchant, list its authoritative products, and create a bounded PurchasePermit. The signed-in buyer must approve separately with a passkey. MCP cannot approve or pay. Never invent product IDs, merchant IDs, prices, confirmation, or payment status." });
+export async function handleMcpRequest(service: SpendSealService, store: SpendSealStore, browserAgent: BrowserAgentService, principal: OAuthPrincipal, req: Request, res: Response): Promise<void> {
+  const server = new McpServer({ name: "spendseal", version: "1.1.0" }, { instructions: "SpendSeal creates constrained merchant PurchasePermits and browser Shopping Tasks for Amazon India or Flipkart. ChatGPT may create and inspect tasks, but it can never choose the final candidate, approve a Purchase Seal, or execute an order. The local extension visibly uses the buyer's signed-in browser and prepare-only mode never submits a live order." });
 
   server.registerTool("list_merchants", { title: "Discover SpendSeal merchants", description: "Find active merchants that publish authoritative catalogs through SpendSeal.", inputSchema: { query: z.string().max(100).optional(), cursor: z.string().uuid().optional() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ query, cursor }) => {
     requireScope(principal, "catalog:read"); const result = await store.listMerchants({ query, cursor, limit: 50 });
@@ -40,6 +41,34 @@ export async function handleMcpRequest(service: SpendSealService, store: SpendSe
     requireScope(principal, "audit:read"); const intent = await store.getIntent(purchasePermitId, principal.userId); if (!intent) return { isError: true, content: [{ type: "text", text: "PurchasePermit not found for the authenticated buyer." }] };
     const events = await store.auditTrail("intent", purchasePermitId); const verification = await store.verifyAudit("intent", purchasePermitId);
     return { structuredContent: { events, verification }, content: [{ type: "text", text: `${events.length} event(s). PurchasePermit audit chain: ${verification.valid ? "verified" : `broken at ${verification.brokenAt}`}.` }] };
+  });
+
+  server.registerTool("create_shopping_task", {
+    title: "Create an Amazon or Flipkart Shopping Task",
+    description: "Ask the buyer's local SpendSeal extension to search one supported website or inspect one exact product URL under a complete payable-total limit. This cannot select, approve, or order.",
+    inputSchema: {
+      site: z.enum(["amazon_in", "flipkart_in"]), query: z.string().min(2).max(240).optional(), productUrl: z.string().url().max(2048).optional(),
+      maxTotalPaise: z.number().int().positive(), requireRefundable: z.boolean().optional(), minimumReturnWindowDays: z.number().int().min(0).max(90).nullable().optional(), latestDeliveryDate: z.string().date().nullable().optional(), expiresInMinutes: z.number().int().min(1).max(30).optional(),
+    }, annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false },
+  }, async (raw) => {
+    requireScope(principal, "shopping:create");
+    const input = CreateShoppingTaskInputSchema.parse({ ...raw, requireRefundable: raw.requireRefundable ?? false, minimumReturnWindowDays: raw.minimumReturnWindowDays ?? null, latestDeliveryDate: raw.latestDeliveryDate ?? null, expiresInMinutes: raw.expiresInMinutes ?? 10 });
+    const task = await browserAgent.createTask(principal.userId, input);
+    const taskUrl = `${service.config.publicBaseUrl}/shopping/${task.id}`;
+    const liveDescription = browserAgent.liveModeEnabled ? "Live submission is owner-enabled; bank challenges still require the buyer." : "Live ordering is disabled.";
+    return { structuredContent: { task, taskUrl, requiresExtension: true, liveOrderEnabled: browserAgent.liveModeEnabled }, content: [{ type: "text", text: `Shopping Task ${task.id} is waiting for the buyer's SpendSeal extension. The buyer must choose a candidate and approve the exact final checkout with a passkey. ${liveDescription} Track it at ${taskUrl}` }] };
+  });
+
+  server.registerTool("get_shopping_task", { title: "Get Shopping Task", description: "Read the authenticated buyer's browser-shopping progress, candidates and Purchase Seal state.", inputSchema: { shoppingTaskId: z.string().uuid() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ shoppingTaskId }) => {
+    requireScope(principal, "shopping:read");
+    const result = await browserAgent.getTask(shoppingTaskId, principal.userId);
+    return { structuredContent: result, content: [{ type: "text", text: `Shopping Task status: ${result.task.status}. ${result.task.status === "selection_required" ? "The buyer must select one candidate in the extension." : "SpendSeal is waiting for the next buyer or extension step."}` }] };
+  });
+
+  server.registerTool("get_shopping_task_audit", { title: "Verify Shopping Task audit", description: "Read and verify the buyer-owned SHA-256 Shopping Task evidence chain.", inputSchema: { shoppingTaskId: z.string().uuid() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ shoppingTaskId }) => {
+    requireScope(principal, "shopping:audit");
+    const result = await browserAgent.audit(shoppingTaskId, principal.userId);
+    return { structuredContent: result, content: [{ type: "text", text: `${result.events.length} browser event(s); task chain ${result.verification.valid ? "verified" : `broken at ${result.verification.brokenAt}`}. Browser evidence is observed, not provider-verified.` }] };
   });
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

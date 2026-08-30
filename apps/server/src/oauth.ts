@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
-import { MCP_SCOPES, sha256 } from "@spendseal/core";
+import { BROWSER_SCOPES, MCP_SCOPES, sha256 } from "@spendseal/core";
 import type { Config } from "./config.js";
 import { transaction } from "./db/client.js";
 import { SpendSealError } from "./service.js";
@@ -12,7 +12,7 @@ export class OAuthService {
   constructor(readonly store: SpendSealStore, readonly config: Config) {}
 
   protectedResourceMetadata() {
-    return { resource: this.config.publicBaseUrl, authorization_servers: [this.config.oauthIssuer], scopes_supported: [...MCP_SCOPES], resource_documentation: `${this.config.publicBaseUrl}/docs/oauth` };
+    return { resource: this.config.publicBaseUrl, authorization_servers: [this.config.oauthIssuer], scopes_supported: [...MCP_SCOPES, ...BROWSER_SCOPES], resource_documentation: `${this.config.publicBaseUrl}/docs/oauth` };
   }
 
   authorizationServerMetadata() {
@@ -27,18 +27,19 @@ export class OAuthService {
       code_challenge_methods_supported: ["S256"],
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
-      scopes_supported: [...MCP_SCOPES],
+      scopes_supported: [...MCP_SCOPES, ...BROWSER_SCOPES],
     };
   }
 
   validateAuthorizationRequest(input: Record<string, string | undefined>) {
     if (input.response_type !== "code") throw new SpendSealError(400, "unsupported_response_type", "Only authorization code flow is supported.");
     if (!input.client_id || !this.allowedClientId(input.client_id)) throw new SpendSealError(400, "invalid_client", "The OAuth client is not allowed.");
-    if (!input.redirect_uri || !this.allowedRedirect(input.redirect_uri)) throw new SpendSealError(400, "invalid_redirect_uri", "The redirect URI is not allowed.");
+    if (!input.redirect_uri || !this.allowedRedirect(input.client_id, input.redirect_uri)) throw new SpendSealError(400, "invalid_redirect_uri", "The redirect URI is not allowed.");
     if (!input.resource || input.resource !== this.config.publicBaseUrl) throw new SpendSealError(400, "invalid_target", "The OAuth resource must exactly match SpendSeal.");
     if (!input.code_challenge || input.code_challenge_method !== "S256") throw new SpendSealError(400, "invalid_request", "S256 PKCE is required.");
     const scopes = [...new Set((input.scope ?? "").split(/\s+/).filter(Boolean))];
-    if (!scopes.length || scopes.some((scope) => !(MCP_SCOPES as readonly string[]).includes(scope))) throw new SpendSealError(400, "invalid_scope", "One or more requested scopes are unsupported.");
+    const allowedScopes = input.client_id === this.config.extensionOauthClientId ? BROWSER_SCOPES : MCP_SCOPES;
+    if (!scopes.length || scopes.some((scope) => !(allowedScopes as readonly string[]).includes(scope))) throw new SpendSealError(400, "invalid_scope", "One or more requested scopes are unsupported for this client.");
     return { clientId: input.client_id, redirectUri: input.redirect_uri, resource: input.resource, codeChallenge: input.code_challenge, scopes, state: input.state ?? "" };
   }
 
@@ -90,8 +91,11 @@ export class OAuthService {
     return { access_token: accessToken, token_type: "Bearer", expires_in: 900, refresh_token: refreshToken, scope: input.scopes.join(" "), refreshId };
   }
 
-  private allowedClientId(value: string): boolean { return value === "https://chatgpt.com/oauth/client.json" || /^https:\/\/chatgpt\.com\/oauth\/[A-Za-z0-9_-]+\/client\.json$/.test(value) || (process.env.NODE_ENV === "test" && value.startsWith("https://test.client/")); }
-  private allowedRedirect(value: string): boolean { return value === "https://chatgpt.com/connector_platform_oauth_redirect" || /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(value) || (process.env.NODE_ENV === "test" && value.startsWith("https://test.client/")); }
+  private allowedClientId(value: string): boolean { return value === this.config.extensionOauthClientId || value === "https://chatgpt.com/oauth/client.json" || /^https:\/\/chatgpt\.com\/oauth\/[A-Za-z0-9_-]+\/client\.json$/.test(value) || (process.env.NODE_ENV === "test" && value.startsWith("https://test.client/")); }
+  private allowedRedirect(clientId: string, value: string): boolean {
+    if (clientId === this.config.extensionOauthClientId) return /^https:\/\/[a-p]{32}\.chromiumapp\.org\/oauth2\/?$/.test(value) || (process.env.NODE_ENV === "test" && value.startsWith("https://test.client/"));
+    return value === "https://chatgpt.com/connector_platform_oauth_redirect" || /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(value) || (process.env.NODE_ENV === "test" && value.startsWith("https://test.client/"));
+  }
 }
 
 function pkceChallenge(verifier: string): string { return createHash("sha256").update(verifier).digest("base64url"); }

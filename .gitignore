@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/
+apps/web/public/downloads/*.zip
 .vercel-build/
 .env
 .env.*

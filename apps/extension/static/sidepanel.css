@@ -1,0 +1,23 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui; background: #06100d; color: #effcf6; }
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(circle at 80% 0, #123b2e 0, transparent 35%), #06100d; }
+main { min-height: 100vh; padding: 22px; }
+header { padding: 18px; border: 1px solid #25483b; border-radius: 20px; background: #091612; }
+h1 { font-size: 25px; line-height: 1.05; margin: 12px 0; }
+p, footer { color: #91a39b; line-height: 1.5; font-size: 13px; }
+.eyebrow { font: 700 10px ui-monospace; letter-spacing: .2em; color: #70edbd; }
+section { margin-top: 16px; }
+.section-head { display: flex; justify-content: space-between; align-items: center; }
+h2 { font-size: 14px; }
+button { width: 100%; padding: 13px; border: 0; border-radius: 12px; background: #70edbd; color: #04100c; font-weight: 750; cursor: pointer; }
+.quiet { width: auto; padding: 9px 12px; border: 1px solid #315347; background: #0a1914; color: #d6e8df; }
+.task, .candidate, .seal { padding: 14px; margin: 10px 0; border: 1px solid #29483d; border-radius: 14px; background: #091612; }
+.task button, .candidate button { margin-top: 10px; }
+.task b, .candidate b { display: block; }
+.meta { margin-top: 7px; color: #8da098; font-size: 12px; }
+.status { display: inline-block; margin-top: 8px; padding: 4px 7px; border: 1px solid #3c6657; border-radius: 999px; font: 700 9px ui-monospace; letter-spacing: .1em; text-transform: uppercase; }
+.danger { border-color: #733c3c; color: #ffbaba; background: #261515; }
+.success { border-color: #27644d; color: #70edbd; background: #0a2018; }
+#actions { display: grid; gap: 10px; margin-top: 12px; }
+#actions a { padding: 13px; border-radius: 12px; background: #70edbd; color: #04100c; text-align: center; font-weight: 750; text-decoration: none; }
+footer { margin-top: 28px; border-top: 1px solid #1e332b; padding-top: 16px; }

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "SpendSeal — Safe Purchase Preparation",
+  "short_name": "SpendSeal",
+  "version": "0.1.0",
+  "description": "Prepare Amazon India and Flipkart purchases under exact buyer-approved constraints.",
+  "permissions": ["activeTab", "scripting", "storage", "identity", "sidePanel"],
+  "host_permissions": ["https://spendseal.vercel.app/*", "https://amazon.in/*", "https://www.amazon.in/*", "https://flipkart.com/*", "https://www.flipkart.com/*"],
+  "background": { "service_worker": "service-worker.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Open SpendSeal" },
+  "content_scripts": [{ "matches": ["https://amazon.in/*", "https://www.amazon.in/*", "https://flipkart.com/*", "https://www.flipkart.com/*"], "js": ["content.js"], "run_at": "document_idle", "all_frames": false }]
+}

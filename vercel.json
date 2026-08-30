@@ -16,6 +16,7 @@
     { "source": "/login", "destination": "/index.html" },
     { "source": "/approve/:path*", "destination": "/index.html" },
     { "source": "/checkout/:path*", "destination": "/index.html" },
+    { "source": "/shopping/:path*", "destination": "/index.html" },
     { "source": "/audit/:path*", "destination": "/index.html" }
   ],
   "headers": [

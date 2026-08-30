@@ -1,4 +1,4 @@
-import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow();
@@ -36,7 +36,7 @@ export const passkeyCredentials = pgTable("passkey_credentials", {
 
 export const webauthnChallenges = pgTable("webauthn_challenges", {
   id: uuid("id").primaryKey(), userId: uuid("user_id").references(() => users.id), purchasePermitId: uuid("intent_lock_id"), purpose: text("purpose").notNull(), challenge: text("challenge").notNull(),
-  context: jsonb("context_json").notNull().default({}), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
+  shoppingTaskId: uuid("shopping_task_id"), context: jsonb("context_json").notNull().default({}), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
 });
 
 export const apiKeys = pgTable("merchant_api_keys", {
@@ -107,3 +107,37 @@ export const oauthTokens = pgTable("oauth_tokens", {
 export const rateLimits = pgTable("rate_limits", {
   key: text("key").primaryKey(), count: integer("count").notNull(), windowEndsAt: timestamp("window_ends_at", { withTimezone: true, mode: "string" }).notNull(), updatedAt: updatedAt(),
 });
+
+export const shoppingTasks = pgTable("shopping_tasks", {
+  id: uuid("id").primaryKey(), buyerId: uuid("buyer_id").notNull().references(() => users.id), site: text("site").notNull(), query: text("query"), productUrl: text("product_url"),
+  maxTotalPaise: integer("max_total_paise").notNull(), requireRefundable: boolean("require_refundable").notNull().default(false), minimumReturnWindowDays: integer("minimum_return_window_days"), latestDeliveryDate: date("latest_delivery_date", { mode: "string" }),
+  quantity: integer("quantity").notNull().default(1), currency: text("currency").notNull().default("INR"), status: text("status").notNull(), selectedCandidateId: uuid("selected_candidate_id"), purchasePermitId: uuid("purchase_permit_id"),
+  checkoutSnapshotHash: text("checkout_snapshot_hash"), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), denialReason: text("denial_reason"), mode: text("mode").notNull().default("prepare_only"), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), createdAt: createdAt(), updatedAt: updatedAt(),
+}, (table) => [index("shopping_tasks_buyer_status_idx").on(table.buyerId, table.status, table.createdAt)]);
+
+export const shoppingCandidates = pgTable("shopping_candidates", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), canonicalProductId: text("canonical_product_id").notNull(), listingId: text("listing_id"), title: text("title").notNull(), seller: text("seller"), variant: text("variant"), condition: text("condition").notNull(), availability: text("availability").notNull(), pricePaise: integer("price_paise").notNull(), currency: text("currency").notNull(), productUrl: text("product_url").notNull(), snapshotHash: text("snapshot_hash").notNull(), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), adapterId: text("adapter_id").notNull(), adapterVersion: text("adapter_version").notNull(), selected: boolean("selected").notNull().default(false), createdAt: createdAt(),
+}, (table) => [uniqueIndex("shopping_candidates_task_product_idx").on(table.taskId, table.canonicalProductId, table.productUrl)]);
+
+export const browserPurchasePermits = pgTable("browser_purchase_permits", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id).unique(), buyerId: uuid("buyer_id").notNull().references(() => users.id), checkoutSnapshot: jsonb("checkout_snapshot_json").notNull(), checkoutSnapshotHash: text("checkout_snapshot_hash").notNull(), maxTotalPaise: integer("max_total_paise").notNull(), status: text("status").notNull(), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), idempotencyKey: text("idempotency_key").notNull().unique(), createdAt: createdAt(),
+});
+
+export const browserInstallations = pgTable("browser_installations", {
+  id: uuid("id").primaryKey(), buyerId: uuid("buyer_id").notNull().references(() => users.id), oauthClientId: text("oauth_client_id").notNull(), name: text("name").notNull(), lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(), revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
+}, (table) => [index("browser_installations_buyer_idx").on(table.buyerId, table.revokedAt)]);
+
+export const browserObservations = pgTable("browser_observations", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id), kind: text("kind").notNull(), adapterId: text("adapter_id").notNull(), adapterVersion: text("adapter_version").notNull(), sourceUrl: text("source_url").notNull(), snapshot: jsonb("snapshot_json").notNull(), snapshotHash: text("snapshot_hash").notNull(), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), createdAt: createdAt(),
+}, (table) => [index("browser_observations_task_idx").on(table.taskId, table.createdAt)]);
+
+export const browserExecutionAttempts = pgTable("browser_execution_attempts", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id).unique(), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id), grantTokenHash: text("grant_token_hash").unique(), grantExpiresAt: timestamp("grant_expires_at", { withTimezone: true, mode: "string" }), status: text("status").notNull(), outcome: jsonb("outcome_json"), createdAt: createdAt(), updatedAt: updatedAt(),
+});
+
+export const shoppingAuditChainHeads = pgTable("shopping_audit_chain_heads", {
+  taskId: uuid("task_id").primaryKey().references(() => shoppingTasks.id), sequence: integer("sequence").notNull().default(0), hash: text("hash").notNull().default("GENESIS"),
+});
+export const shoppingAuditEvents = pgTable("shopping_audit_events", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), buyerId: uuid("buyer_id").notNull().references(() => users.id), sequence: integer("sequence").notNull(), eventType: text("event_type").notNull(), actor: text("actor").notNull(), reasonCode: text("reason_code"), adapterId: text("adapter_id"), adapterVersion: text("adapter_version"), evidenceAssurance: text("evidence_assurance").notNull().default("browser_observed"), payload: jsonb("payload_json").notNull(), previousHash: text("previous_hash").notNull(), hash: text("hash").notNull(), createdAt: createdAt(),
+}, (table) => [uniqueIndex("shopping_audit_task_sequence_unique").on(table.taskId, table.sequence), uniqueIndex("shopping_audit_task_hash_unique").on(table.taskId, table.hash)]);

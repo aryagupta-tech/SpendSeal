@@ -4,11 +4,12 @@ import { Pool } from "pg";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
 import { OAuthService } from "../src/oauth.js";
+import { BrowserAgentService } from "../src/browser-agent.js";
 import { SpendSealService } from "../src/service.js";
 import { SpendSealStore } from "../src/store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "postgresql://agentrail:agentrail-local-only@127.0.0.1:5432/agentrail_test";
-let pool: Pool; let store: SpendSealStore; let service: SpendSealService;
+let pool: Pool; let store: SpendSealStore; let service: SpendSealService; let browserAgent: BrowserAgentService;
 
 beforeAll(async () => {
   const target = new URL(databaseUrl); const databaseName = target.pathname.slice(1); const admin = new Pool({ connectionString: new URL("/postgres", target).toString() });
@@ -16,6 +17,7 @@ beforeAll(async () => {
   pool = createDatabase(databaseUrl).pool; await runMigrations(pool); store = new SpendSealStore(pool);
   const config = loadConfig({ databaseUrl, publicBaseUrl: "http://agentrail.test", oauthIssuer: "http://agentrail.test", webauthnOrigin: "http://agentrail.test", webauthnRpId: "agentrail.test", credentialEncryptionKey: Buffer.alloc(32, 7) });
   service = new SpendSealService(store, config);
+  browserAgent = new BrowserAgentService(pool, false);
 }, 30_000);
 
 beforeEach(async () => {
@@ -117,6 +119,82 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect(paymentEvents).toHaveLength(2); expect(paymentEvents.every((event) => event.actor === "mock_adapter")).toBe(true);
   });
 
+  it("prepares one browser purchase, blocks replay, and verifies its task chain", async () => {
+    const buyer = await user("browser-buyer");
+    const installationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    await browserAgent.registerInstallation(
+      { userId: buyer.id, clientId: "spendseal-browser-extension", scopes: ["browser:tasks:read"] },
+      { installationId, name: "Test Chromium" },
+    );
+    const task = await browserAgent.createTask(buyer.id, {
+      site: "amazon_in",
+      query: "headphones",
+      maxTotalPaise: 100_000,
+      requireRefundable: false,
+      minimumReturnWindowDays: null,
+      latestDeliveryDate: null,
+      expiresInMinutes: 10,
+    });
+    const candidates = await browserAgent.saveCandidates(buyer.id, installationId, task.id, [{
+      canonicalProductId: "B012345678",
+      listingId: "B012345678",
+      title: "Test headphones",
+      seller: "Test seller",
+      variant: "Black",
+      condition: "new",
+      availability: "available",
+      pricePaise: 90_000,
+      currency: "INR",
+      productUrl: "https://www.amazon.in/dp/B012345678",
+      snapshotHash: "candidate-snapshot",
+      observedAt: new Date().toISOString(),
+      adapterId: "amazon_in",
+      adapterVersion: "1.0.0",
+    }]);
+    await browserAgent.selectCandidate(task.id, buyer.id, candidates[0]!.id);
+    const observation = {
+      site: "amazon_in" as const,
+      sourceUrl: "https://www.amazon.in/gp/buy/spc",
+      canonicalProductId: "B012345678",
+      listingId: "B012345678",
+      title: "Test headphones",
+      seller: "Test seller",
+      variant: "Black",
+      condition: "new",
+      quantity: 1,
+      currency: "INR" as const,
+      itemSubtotalPaise: 90_000,
+      shippingPaise: 0,
+      taxPaise: 0,
+      discountPaise: 0,
+      finalTotalPaise: 90_000,
+      extraCartItemCount: 0,
+      refundable: null,
+      returnWindowDays: null,
+      deliveryDate: null,
+      maskedAddressLabel: "PIN ••••01",
+      addressFingerprint: "address-fingerprint",
+      paymentMethodType: "saved_card",
+      observedAt: new Date().toISOString(),
+      adapterId: "amazon_in" as const,
+      adapterVersion: "1.0.0",
+      evidenceAssurance: "browser_observed" as const,
+    };
+    expect((await browserAgent.observeCheckout(task.id, buyer.id, installationId, observation)).allowed).toBe(true);
+    await browserAgent.approve(task.id, buyer.id);
+    const claims = await Promise.all([
+      browserAgent.claimExecution(task.id, buyer.id, installationId, observation),
+      browserAgent.claimExecution(task.id, buyer.id, installationId, observation),
+    ]);
+    expect(claims.map((claim) => claim.status).sort()).toEqual(["denied", "prepared"]);
+    expect(claims.find((claim) => claim.status === "denied")?.reason).toBe("REPLAY_DETECTED");
+    const attempts = await pool.query("SELECT count(*)::int AS count FROM browser_execution_attempts WHERE task_id=$1", [task.id]);
+    expect(attempts.rows[0].count).toBe(1);
+    const audit = await browserAgent.audit(task.id, buyer.id);
+    expect(audit.verification).toMatchObject({ valid: true, brokenAt: null });
+    expect(audit.events.map((event) => event.eventType)).toEqual(expect.arrayContaining(["PURCHASE_PREPARED", "REPLAY_BLOCKED"]));
+  });
+
   it("rejects audit mutation and detects offline tampering", async () => {
     const setup = await approvedIntent(); expect((await store.verifyAudit("intent", setup.intent.id)).valid).toBe(true);
     await expect(pool.query("UPDATE audit_events SET payload_json='{}' WHERE scope_type='intent' AND scope_id=$1", [setup.intent.id])).rejects.toThrow(/append-only/);
@@ -125,6 +203,14 @@ describe("PostgreSQL tenant and payment invariants", () => {
 });
 
 describe("OAuth 2.1 buyer binding", () => {
+  it("separates extension browser scopes from ChatGPT MCP scopes", () => {
+    const config = loadConfig({ databaseUrl, publicBaseUrl: "http://agentrail.test", oauthIssuer: "http://agentrail.test", webauthnOrigin: "http://agentrail.test", webauthnRpId: "agentrail.test", credentialEncryptionKey: Buffer.alloc(32, 5) });
+    const oauth = new OAuthService(store, config);
+    const extensionRequest = oauth.validateAuthorizationRequest({ response_type: "code", client_id: config.extensionOauthClientId, redirect_uri: `https://${"a".repeat(32)}.chromiumapp.org/oauth2`, resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "browser:tasks:read browser:observations:write" });
+    expect(extensionRequest.scopes).toEqual(["browser:tasks:read", "browser:observations:write"]);
+    expect(() => oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "browser:tasks:read" })).toThrowError(/scope/i);
+  });
+
   it("enforces S256 PKCE, single-use codes, rotating refresh tokens, and reuse-family revocation", async () => {
     const buyer = await user("oauth-buyer"); const config = loadConfig({ databaseUrl, publicBaseUrl: "http://agentrail.test", oauthIssuer: "http://agentrail.test", webauthnOrigin: "http://agentrail.test", webauthnRpId: "agentrail.test", credentialEncryptionKey: Buffer.alloc(32, 3) }); const oauth = new OAuthService(store, config);
     const verifier = "a".repeat(64); const challenge = createHash("sha256").update(verifier).digest("base64url"); const clientId = "https://test.client/client.json"; const redirectUri = "https://test.client/callback";

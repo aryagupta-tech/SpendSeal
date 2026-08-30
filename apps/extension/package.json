@@ -1,0 +1,1 @@
+{"name":"@spendseal/extension","version":"0.1.0","private":true,"type":"module","scripts":{"build":"node scripts/build.mjs","typecheck":"tsc --noEmit"},"devDependencies":{"@types/archiver":"^8.0.0","archiver":"^8.0.0","tsup":"^8.5.0","typescript":"^5.9.2"}}

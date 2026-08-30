@@ -4,9 +4,10 @@ import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, Registra
 import type { Config } from "./config.js";
 import { SpendSealError } from "./service.js";
 import { SpendSealStore } from "./store.js";
+import { BrowserAgentService } from "./browser-agent.js";
 
 export class SpendSealWebAuthn {
-  constructor(readonly store: SpendSealStore, readonly config: Config) {}
+  constructor(readonly store: SpendSealStore, readonly config: Config, readonly browserAgent?: BrowserAgentService) {}
 
   async registrationOptions(username: string, displayName: string) {
     if (await this.store.getUserByUsername(username)) throw new SpendSealError(409, "USERNAME_TAKEN", "That buyer username is already registered.");
@@ -73,6 +74,28 @@ export class SpendSealWebAuthn {
     const intent = await this.store.completeApproval({ purchasePermitId, buyerId, sessionToken, credentialId: credential.id, counter: verification.authenticationInfo.newCounter, deviceType: verification.authenticationInfo.credentialDeviceType, backedUp: verification.authenticationInfo.credentialBackedUp });
     if (!intent) throw new SpendSealError(409, "APPROVAL_SESSION_INVALID", "The approval session was already consumed.");
     return intent;
+  }
+
+  async shoppingApprovalOptions(taskId: string, buyerId: string) {
+    if (!this.browserAgent) throw new SpendSealError(404, "BROWSER_AGENT_DISABLED", "Browser purchasing is unavailable.");
+    const { task, permit } = await this.browserAgent.getTask(taskId, buyerId);
+    if (task.status !== "pending_approval" || !permit || permit.status !== "pending_confirmation" || new Date(permit.expiresAt).getTime() <= Date.now()) throw new SpendSealError(409, "TASK_NOT_PENDING", "This Shopping Task is not awaiting approval.");
+    const credentials = await this.store.listPasskeys(buyerId, this.config.webauthnRpId);
+    if (!credentials.length) throw new SpendSealError(409, "PASSKEY_NOT_ENROLLED", "Enroll a passkey before approving this Purchase Seal.");
+    const options = await generateAuthenticationOptions({ rpID: this.config.webauthnRpId, timeout: 60_000, userVerification: "required", allowCredentials: credentials.map((credential) => ({ id: credential.id, transports: credential.transports as AuthenticatorTransportFuture[] })) });
+    const challengeId = await this.store.createChallenge({ userId: buyerId, shoppingTaskId: taskId, purpose: "shopping_approval", challenge: options.challenge });
+    return { challengeId, options };
+  }
+
+  async approveShoppingTask(taskId: string, buyerId: string, challengeId: string, response: AuthenticationResponseJSON) {
+    if (!this.browserAgent) throw new SpendSealError(404, "BROWSER_AGENT_DISABLED", "Browser purchasing is unavailable.");
+    const credential = await this.store.getPasskey(response.id, this.config.webauthnRpId);
+    if (!credential || credential.userId !== buyerId) throw new SpendSealError(403, "UNKNOWN_PASSKEY", "This passkey does not belong to the Shopping Task buyer.");
+    const challenge = await this.store.consumeChallenge({ id: challengeId, purpose: "shopping_approval", userId: buyerId, shoppingTaskId: taskId });
+    if (!challenge) throw new SpendSealError(409, "WEBAUTHN_CHALLENGE_INVALID", "The approval challenge expired or was already used.");
+    const verification = await this.verifyAssertion(response, challenge.challenge, credential);
+    await this.store.updatePasskeyCounter(credential.id, verification.authenticationInfo.newCounter);
+    return this.browserAgent.approve(taskId, buyerId);
   }
 
   private async verifyAssertion(response: AuthenticationResponseJSON, expectedChallenge: string, credential: { id: string; publicKey: Uint8Array; counter: number; transports: string[] }) {
