@@ -25,7 +25,7 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 - A 15-minute product-review checkpoint: clicking a recommended match or manually opening another product only creates a proposal. Checkout starts only after the buyer presses **Use this product**.
 - OpenAI API prepaid-credit preparation with one-time billing enforcement, a timestamped USD/INR reference quote, a 10% conversion/issuer-fee buffer, masked organization binding, and no claim that a bank's final conversion is guaranteed.
 - Buyer-bound Shopping Tasks and Purchase Seals covering product, variant, seller, quantity, complete payable total, delivery, return constraints, address fingerprint, adapter version, single-use execution, and a separate SHA-256 audit chain.
-- Prepare-only execution by default (`BROWSER_LIVE_PURCHASE_ENABLED=false`). Login, CAPTCHA, OTP, 3-D Secure, ambiguous pages, unrelated cart items, and external payment challenges always return control to the buyer.
+- Self-service live retail execution: any authenticated buyer can opt in from the SpendSeal dashboard without a Buyer ID or Vercel access. Every order still requires final passkey approval and revalidation. Set `BROWSER_LIVE_PURCHASE_ENABLED=false` as a deployment-wide emergency kill switch. Login, CAPTCHA, OTP, 3-D Secure, ambiguous pages, unrelated cart items, and external payment challenges always return control to the buyer.
 - Separate SHA-256 hash-linked chains for each PurchasePermit and merchant administration stream. PostgreSQL triggers reject updates/deletes.
 - JSON request logging, secret-safe audit payloads, rate limits, Zod validation, size limits, CORS, security headers, health/readiness, and graceful shutdown.
 
@@ -71,8 +71,7 @@ Use the permanent **Production** domain for every security setting. Do not use a
    SESSION_ABSOLUTE_HOURS=8
    EXTENSION_OAUTH_CLIENT_ID=spendseal-browser-extension
    BROWSER_AGENT_ENABLED=true
-   BROWSER_LIVE_PURCHASE_ENABLED=false
-   BROWSER_LIVE_BUYER_IDS=
+   BROWSER_LIVE_PURCHASE_ENABLED=true
    OPENAI_CREDITS_LIVE_ENABLED=false
    GENERIC_WEB_LIVE_ENABLED=false
    DEMO_MODE=false
@@ -254,7 +253,7 @@ The extension supports Chrome, Edge, Arc, Brave, and other Chromium browsers. It
 9. SpendSeal shows one protected confirmation with the masked destination, delivery/account, seller/variant, quantity, payment type, charges, recurrence status, assurance level, and final total. Approve it once with your passkey.
 10. SpendSeal automatically re-checks the visible checkout. The default expected result is `PURCHASE_PREPARED`; no live order is submitted. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with you.
 
-The build also produces `/downloads/spendseal-extension.zip?v=0.4.3`; the version query prevents an older ZIP from being reused by a browser or CDN cache. Amazon, Flipkart, and OpenAI are browser adapters, not official integrations. Their evidence is `browser_observed`; generic sites are `agent_assisted`; neither is provider-verified. Retail live mode requires both `BROWSER_LIVE_PURCHASE_ENABLED=true` and the exact buyer UUID in `BROWSER_LIVE_BUYER_IDS`. The signed-in dashboard shows that buyer UUID. OpenAI and generic live execution additionally require their separate flags and stay off by default.
+The build also produces `/downloads/spendseal-extension.zip?v=0.4.4`; the version query prevents an older ZIP from being reused by a browser or CDN cache. Amazon, Flipkart, and OpenAI are browser adapters, not official integrations. Their evidence is `browser_observed`; generic sites are `agent_assisted`; neither is provider-verified. With the deployment gate `BROWSER_LIVE_PURCHASE_ENABLED=true`, each authenticated buyer may turn real retail purchases on or off for their own account from the dashboard; no Buyer ID or per-user environment variable is required. OpenAI and generic live execution additionally require their separate flags and stay off by default.
 
 OAuth metadata is published at `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, and `/.well-known/openid-configuration`. Authorization codes are single-use and expire after five minutes. Access tokens are opaque and live for fifteen minutes. Refresh tokens rotate and reuse revokes the whole family.
 

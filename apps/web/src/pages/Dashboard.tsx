@@ -14,6 +14,7 @@ type ShopifySyncResult = { created: number; updated: number; unchanged: number; 
 type MerchantRole = "owner" | "admin" | "catalog_manager" | "auditor";
 type ManagedMerchant = Merchant & { role: MerchantRole };
 type ManagedMerchantList = { merchants: ManagedMerchant[]; nextCursor: string | null };
+type BrowserLiveMode = { available: boolean; enabled: boolean };
 
 const emptyProduct = { sku: "", name: "", description: "", priceRupees: 999, refundable: true, refundWindowDays: 7 };
 
@@ -35,6 +36,7 @@ export function Dashboard() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
+  const [browserLiveMode, setBrowserLiveMode] = useState<BrowserLiveMode | null>(null);
   const [merchantForm, setMerchantForm] = useState({ displayName: "SpendSeal Test Store", slug: "agentrail-test-store" });
   const [productForm, setProductForm] = useState(emptyProduct);
   const [razorpayForm, setRazorpayForm] = useState({ keyId: "", keySecret: "" });
@@ -47,10 +49,10 @@ export function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [sessionResult, healthResult, owned, catalog, intentResult] = await Promise.all([
-        api<Session>("/api/v1/auth/session"), api<Health>("/api/v1/health"), api<ManagedMerchantList>("/api/v1/merchants"), api<MerchantList>("/api/v1/catalog/merchants"), api<{ intents: PurchasePermit[] }>("/api/v1/intents"),
+      const [sessionResult, healthResult, owned, catalog, intentResult, liveMode] = await Promise.all([
+        api<Session>("/api/v1/auth/session"), api<Health>("/api/v1/health"), api<ManagedMerchantList>("/api/v1/merchants"), api<MerchantList>("/api/v1/catalog/merchants"), api<{ intents: PurchasePermit[] }>("/api/v1/intents"), api<BrowserLiveMode>("/api/v1/browser-live-mode"),
       ]);
-      setSession(sessionResult); setHealth(healthResult); setOwnedMerchants(owned.merchants); setCatalogMerchants(catalog.merchants); setIntents(intentResult.intents);
+      setSession(sessionResult); setHealth(healthResult); setOwnedMerchants(owned.merchants); setCatalogMerchants(catalog.merchants); setIntents(intentResult.intents); setBrowserLiveMode(liveMode);
       setMerchantId((current) => current || owned.merchants[0]?.id || catalog.merchants[0]?.id || ""); setError("");
     } catch (cause) {
       if (cause instanceof Error && "code" in cause && cause.code === "AUTH_REQUIRED") { navigate("/login", { replace: true }); return; }
@@ -98,6 +100,7 @@ export function Dashboard() {
   async function createIntent() { if (!selectedProduct) return; await run("intent", async () => { const result = await api<IntentResponse>("/api/v1/intents", { method: "POST", body: JSON.stringify({ merchantId: selectedProduct.merchantId, productId: selectedProduct.id, maxTotalPaise: constraints.maxRupees * 100, priceChangePolicy: constraints.priceChangePolicy, requireRefundable: constraints.requireRefundable, minimumRefundWindowDays: constraints.requireRefundable ? constraints.minimumRefundWindowDays : null, expiresInMinutes: constraints.expiresInMinutes }) }); setCreated(result); await load(); }); }
   async function attack() { if (!selectedProduct || !canManage) return; await run("attack", async () => { await api(`/api/v1/merchants/${merchantId}/products/${selectedProduct.id}`, { method: "PATCH", body: JSON.stringify({ expectedVersion: selectedProduct.version, changes: { pricePaise: selectedProduct.pricePaise + 30_000 } }) }); await loadMerchant(); }); }
   async function seedDemo() { await run("seed", async () => { const result = await api<{ merchant: Merchant }>("/api/v1/demo/seed", { method: "POST" }); await load(); setMerchantId(result.merchant.id); }); }
+  async function setLivePurchasing(enabled: boolean) { await run("browser-live", async () => { setBrowserLiveMode(await api<BrowserLiveMode>("/api/v1/browser-live-mode", { method: "POST", body: JSON.stringify({ enabled }) })); }); }
   async function logout() { await api("/api/v1/auth/logout", { method: "POST" }); navigate("/login", { replace: true }); }
 
   if (loading) return <div className="route-stage"><div className="route-glow" /><div className="trust-preview relative animate-pulse p-8 text-white/45">Loading your multi-merchant authorization platform…</div></div>;
@@ -107,11 +110,15 @@ export function Dashboard() {
       <p className="eyebrow">Merchant-owned catalog · buyer-owned constraints</p><h1 className="mt-5 text-5xl font-semibold leading-[.98] tracking-[-.06em] sm:text-6xl">The authorization firewall for <span className="text-mint">any merchant.</span></h1>
       <p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-white/52">Merchants publish authoritative products. Buyers set limits. ChatGPT interprets intent. Passkeys authorize. SpendSeal enforces. Razorpay Test Mode executes.</p>
       <div className="mt-7 flex flex-wrap justify-center gap-2"><span className="pipeline-node"><Bot size={15} className="text-mint" /> ChatGPT</span><span className="pipeline-node"><Fingerprint size={15} className="text-mint" /> Passkey</span><span className="pipeline-node"><ShieldCheck size={15} className="text-mint" /> Policy</span><span className="pipeline-node"><CircleDollarSign size={15} className="text-mint" /> Razorpay</span></div>
-      <div className="mt-6 flex flex-wrap justify-center gap-3"><a className="button-primary" href="/downloads/spendseal-extension.zip?v=0.4.3" download><CloudDownload size={16} /> Download browser extension</a><span className="flex items-center rounded-xl border border-white/[.08] px-4 text-xs text-white/45">Amazon India + Flipkart · controlled live mode</span></div>
+      <div className="mt-6 flex flex-wrap justify-center gap-3"><a className="button-primary" href="/downloads/spendseal-extension.zip?v=0.4.4" download><CloudDownload size={16} /> Download browser extension</a><span className="flex items-center rounded-xl border border-white/[.08] px-4 text-xs text-white/45">Amazon India + Flipkart · passkey-protected live mode</span></div>
     </div></section>
 
     <main className="mx-auto max-w-[1460px] space-y-8 px-5 pb-10 lg:px-8">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><div><p className="text-sm font-semibold">Signed in as {session?.user.displayName}</p><p className="text-xs text-white/35">{session?.user.username} · Buyer ID {session?.user.id}</p></div><div className="flex flex-wrap gap-2"><a className="button-secondary !px-3 !py-2" href="/downloads/spendseal-extension.zip?v=0.4.3" download><CloudDownload size={14} /> Extension ZIP</a><button className="button-secondary !px-3 !py-2" onClick={logout}><LogOut size={14} /> Sign out</button></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><div><p className="text-sm font-semibold">Signed in as {session?.user.displayName}</p><p className="text-xs text-white/35">{session?.user.username} · live purchasing needs no Buyer ID setup</p></div><div className="flex flex-wrap gap-2"><a className="button-secondary !px-3 !py-2" href="/downloads/spendseal-extension.zip?v=0.4.4" download><CloudDownload size={14} /> Extension ZIP</a><button className="button-secondary !px-3 !py-2" onClick={logout}><LogOut size={14} /> Sign out</button></div></div>
+      <div className={`flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-4 ${browserLiveMode?.enabled ? "border-mint/25 bg-mint/[.055]" : "border-amber-300/20 bg-amber-300/[.045]"}`}>
+        <div className="max-w-3xl"><p className="text-sm font-semibold">Real browser purchases: {browserLiveMode?.enabled ? "enabled for your account" : "off"}</p><p className="mt-1 text-xs leading-5 text-white/45">No Vercel access or Buyer ID is needed. When enabled, SpendSeal may place one real order only after you review the exact checkout and approve it with your passkey. OTP, UPI PIN, CAPTCHA and bank checks always stay with you.</p></div>
+        {browserLiveMode?.available ? <button className={browserLiveMode.enabled ? "button-secondary" : "button-primary"} disabled={busy === "browser-live"} onClick={() => setLivePurchasing(!browserLiveMode.enabled)}>{browserLiveMode.enabled ? "Turn off real purchases" : "Enable real purchases"}</button> : <Badge tone="warn">Deployment kill switch is off</Badge>}
+      </div>
       {error && <ErrorNotice message={error} />}{revealedSecret && <OneTimeSecret {...revealedSecret} onClose={() => setRevealedSecret(null)} />}
       <Reveal className="grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Your merchants" value={ownedMerchants.length} /><Metric label="Catalog products" value={products.length} /><Metric label="Blocked permits" value={denied} /><Metric label="Paid test orders" value={paid} /></Reveal>
 

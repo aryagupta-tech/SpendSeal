@@ -59,6 +59,22 @@ export function ShoppingTaskPage() {
     } finally { setBusy(false); }
   }
 
+  async function chooseAnotherProduct() {
+    setBusy(true); setError("");
+    try {
+      if (continuationId) {
+        const cancelled = await api<{ redirectUrl: string }>(`/api/v1/shopping-tasks/${id}/approval-continuations/${continuationId}/cancel`, { method: "POST" });
+        window.location.assign(cancelled.redirectUrl);
+        return;
+      }
+      await api(`/api/v1/shopping-tasks/${id}/reselect-product`, { method: "POST" });
+      navigate("/", { replace: true });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not return to product selection");
+      setBusy(false);
+    }
+  }
+
   if (!data) return <div className="route-stage">
     <div className="route-glow" />
     <div className="panel relative p-8">
@@ -152,6 +168,9 @@ export function ShoppingTaskPage() {
           </div> : <div className="rounded-xl border border-white/10 p-4 text-sm text-white/50">
             Continue in the SpendSeal extension to select a product and collect final checkout evidence.
           </div>}
+          {!prepared && !["completed", "submitting", "reconciliation_required"].includes(task.status) && <button onClick={chooseAnotherProduct} disabled={busy} className="button-secondary mt-3 w-full">
+            ← Choose another product
+          </button>}
           <p className="mt-3 text-center font-mono text-[8px] uppercase tracking-wider text-white/25">
             Passkey proves authenticator control—not legal identity · one execution attempt
           </p>

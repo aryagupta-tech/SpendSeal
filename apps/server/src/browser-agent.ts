@@ -43,10 +43,24 @@ export type BrowserExecutionResult = {
 };
 
 export class BrowserAgentService {
-  private readonly liveBuyerIds: Set<string>;
-  constructor(private readonly pool: Pool, private readonly livePurchaseEnabled = false, private readonly enabled = true, liveBuyerIds: string[] = [], private readonly openAiCreditsLiveEnabled = false, private readonly genericWebLiveEnabled = false) { this.liveBuyerIds = new Set(liveBuyerIds); }
+  constructor(private readonly pool: Pool, private readonly livePurchaseEnabled = false, private readonly enabled = true, private readonly openAiCreditsLiveEnabled = false, private readonly genericWebLiveEnabled = false) {}
   get liveModeEnabled(): boolean { return this.enabled && this.livePurchaseEnabled; }
-  liveModeEnabledFor(buyerId: string): boolean { return this.liveModeEnabled && this.liveBuyerIds.has(buyerId); }
+  async liveModeEnabledFor(buyerId: string): Promise<boolean> {
+    if (!this.liveModeEnabled) return false;
+    const result = await this.pool.query("SELECT browser_live_purchase_enabled FROM users WHERE id=$1 AND status='active'", [buyerId]);
+    return result.rows[0]?.browser_live_purchase_enabled === true;
+  }
+
+  async liveModePreference(buyerId: string): Promise<{ available: boolean; enabled: boolean }> {
+    return { available: this.liveModeEnabled, enabled: await this.liveModeEnabledFor(buyerId) };
+  }
+
+  async setLiveModePreference(buyerId: string, enabled: boolean): Promise<{ available: boolean; enabled: boolean }> {
+    if (enabled && !this.liveModeEnabled) throw new Error("LIVE_PURCHASE_DISABLED");
+    const result = await this.pool.query("UPDATE users SET browser_live_purchase_enabled=$2 WHERE id=$1 AND status='active' RETURNING browser_live_purchase_enabled", [buyerId, enabled]);
+    if (!result.rows[0]) throw new Error("SHOPPING_TASK_NOT_FOUND");
+    return { available: this.liveModeEnabled, enabled: result.rows[0].browser_live_purchase_enabled === true };
+  }
 
   async createTask(buyerId: string, raw: CreateShoppingTaskInput): Promise<ShoppingTask> {
     this.ensureEnabled();
@@ -54,7 +68,7 @@ export class BrowserAgentService {
     return transaction(this.pool, async (client) => {
       const id = randomUUID();
       const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
-      const mode = this.liveModeEnabledFor(buyerId) ? "live" : "prepare_only";
+      const mode = await this.liveModeEnabledFor(buyerId) ? "live" : "prepare_only";
       const allowedOrigin = input.site === "amazon_in" ? "https://www.amazon.in" : "https://www.flipkart.com";
       const result = await client.query(`INSERT INTO shopping_tasks(id,buyer_id,site,query,product_url,max_total_paise,require_refundable,minimum_return_window_days,latest_delivery_date,status,mode,expires_at,allowed_origin,purchase_kind)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'waiting_for_extension',$10,$11,$12,'physical_good') RETURNING *`,
@@ -70,7 +84,7 @@ export class BrowserAgentService {
     return transaction(this.pool, async (client) => {
       const id = randomUUID(); const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
       const siteLiveEnabled = input.site === "openai_api" ? this.openAiCreditsLiveEnabled : input.site === "generic_web" ? this.genericWebLiveEnabled : true;
-      const mode = this.liveModeEnabledFor(buyerId) && siteLiveEnabled ? "live" : "prepare_only";
+      const mode = await this.liveModeEnabledFor(buyerId) && siteLiveEnabled ? "live" : "prepare_only";
       const result = await client.query(`INSERT INTO shopping_tasks(id,buyer_id,site,query,product_url,max_total_paise,require_refundable,minimum_return_window_days,latest_delivery_date,status,mode,expires_at,allowed_origin,purchase_kind)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'waiting_for_extension',$10,$11,$12,$13) RETURNING *`,
       [id, buyerId, input.site, input.objective, input.siteUrl, input.maxTotalPaise, input.requireRefundable, input.minimumReturnWindowDays, input.latestDeliveryDate, mode, expiresAt, input.allowedOrigin, input.purchaseKind]);
@@ -376,6 +390,47 @@ export class BrowserAgentService {
     });
   }
 
+  async restartProductSelection(taskId: string, buyerId: string, installationId?: string): Promise<ShoppingTask> {
+    this.ensureEnabled();
+    return transaction(this.pool, async (client) => {
+      const task = await this.lockTask(client, taskId, buyerId);
+      if (installationId) await this.assertInstallation(client, installationId, buyerId);
+      return this.resetProductSelection(client, task, buyerId, installationId ? "browser_extension" : "buyer");
+    });
+  }
+
+  async cancelApprovalContinuation(taskId: string, buyerId: string, continuationId: string): Promise<{ redirectUrl: string; task: ShoppingTask }> {
+    this.ensureEnabled();
+    return transaction(this.pool, async (client) => {
+      const task = await this.lockTask(client, taskId, buyerId);
+      const result = await client.query("SELECT * FROM browser_approval_continuations WHERE id=$1 AND task_id=$2 AND consumed_at IS NULL AND expires_at>now() FOR UPDATE", [continuationId, taskId]);
+      const continuation = result.rows[0];
+      if (!continuation) throw new Error("APPROVAL_CONTINUATION_INVALID");
+      const restarted = await this.resetProductSelection(client, task, buyerId, "buyer");
+      const redirect = new URL(continuation.redirect_uri);
+      redirect.searchParams.set("state", continuation.state);
+      redirect.searchParams.set("result", "cancelled");
+      redirect.searchParams.set("task_id", taskId);
+      return { redirectUrl: redirect.toString(), task: restarted };
+    });
+  }
+
+  private async resetProductSelection(client: PoolClient, task: ShoppingTask, buyerId: string, actor: "buyer" | "browser_extension"): Promise<ShoppingTask> {
+    if (["submitting", "completed", "prepared", "reconciliation_required", "expired"].includes(task.status)) throw new Error("REPLAY_DETECTED");
+    if (await client.query("SELECT 1 FROM browser_execution_attempts WHERE task_id=$1", [task.id]).then((result) => result.rowCount)) throw new Error("REPLAY_DETECTED");
+    await client.query("UPDATE shopping_selection_proposals SET status='replaced' WHERE task_id=$1 AND status='pending'", [task.id]);
+    await client.query("UPDATE shopping_candidates SET selected=false WHERE task_id=$1", [task.id]);
+    if (task.purchasePermitId) await client.query("UPDATE browser_purchase_permits SET status='denied' WHERE id=$1 AND status IN ('pending_confirmation','confirmed')", [task.purchasePermitId]);
+    await client.query("UPDATE browser_approval_continuations SET consumed_at=now() WHERE task_id=$1 AND consumed_at IS NULL", [task.id]);
+    const result = await client.query(`UPDATE shopping_tasks SET proposed_candidate_id=NULL,selected_candidate_id=NULL,purchase_permit_id=NULL,checkout_snapshot_hash=NULL,confirmed_at=NULL,selection_confirmed_at=NULL,payment_preference=NULL,denial_reason=NULL,status='searching',updated_at=now() WHERE id=$1 RETURNING *`, [task.id]);
+    await this.appendAudit(client, task.id, buyerId, "PRODUCT_RESELECTION_REQUESTED", actor, null, {
+      previousCandidateId: task.selectedCandidateId,
+      previousPurchasePermitId: task.purchasePermitId,
+      approvalAndExecutionGrantInvalidated: true,
+    });
+    return mapTask(result.rows[0]);
+  }
+
   async approve(taskId: string, buyerId: string): Promise<ShoppingTask> {
     this.ensureEnabled();
     return transaction(this.pool, async (client) => {
@@ -423,7 +478,7 @@ export class BrowserAgentService {
         await this.appendAudit(client, taskId, buyerId, "PURCHASE_PREPARED", "browser_extension", null, { liveOrderSubmitted: false }, observation.adapterId, observation.adapterVersion, "prepared_only");
         return { status: "prepared" };
       }
-      if (!this.liveModeEnabledFor(buyerId)) {
+      if (!await this.liveModeEnabledFor(buyerId)) {
         await this.appendAudit(client, taskId, buyerId, "POLICY_DENIED", "policy_engine", "LIVE_PURCHASE_DISABLED", { liveOrderSubmitted: false }, observation.adapterId, observation.adapterVersion);
         return { status: "denied", reason: "LIVE_PURCHASE_DISABLED" };
       }

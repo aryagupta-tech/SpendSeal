@@ -44,6 +44,7 @@ async function handle(message: any, sender: any) {
   if (message.type === "confirmProposal") return confirmProposal(message.taskId, message.proposalId, message.productUrl);
   if (message.type === "dismissProposal") return dismissProposal(message.taskId, message.proposalId);
   if (message.type === "choosePayment") return choosePayment(message.taskId, message.paymentPreference);
+  if (message.type === "changeProduct") return changeProduct(message.taskId);
   if (message.type === "approveAndContinue") return approveAndContinue(message.taskId);
   if (message.type === "resume" || message.type === "retry") return advance(message.taskId, true);
   if (message.type === "checkoutChanged") { const flow = await currentFlow(); if (flow && sender.tab?.id === flow.tabId) return advance(flow.taskId, true); return { ignored: true }; }
@@ -73,12 +74,18 @@ async function connect() {
 
 async function state() {
   const stored = await chrome.storage.local.get(["tokens", "installationId", "activeTaskId", "livePurchaseEnabled", "flow"]);
-  return { connected: Boolean(stored.tokens), installationId: stored.installationId ?? null, activeTaskId: stored.activeTaskId ?? null, livePurchaseEnabled: stored.livePurchaseEnabled === true, flow: stored.flow ?? null };
+  let livePurchaseEnabled = stored.livePurchaseEnabled === true;
+  if (stored.tokens && stored.installationId) {
+    const registration = await api("/api/v1/browser/installations", { method: "POST", body: JSON.stringify({ installationId: stored.installationId, name: "Local Chromium extension" }) });
+    livePurchaseEnabled = registration.livePurchaseEnabled === true;
+    await chrome.storage.local.set({ livePurchaseEnabled });
+  }
+  return { connected: Boolean(stored.tokens), installationId: stored.installationId ?? null, activeTaskId: stored.activeTaskId ?? null, livePurchaseEnabled, flow: stored.flow ?? null };
 }
 
 async function openTask(task: any, permissionOrigin?: string) {
   await chrome.storage.local.set({ activeTaskId: task.id });
-  const target = task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query)}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query)}` : task.allowedOrigin);
+  const target = shoppingStartUrl(task);
   if (!target) throw new Error("This task has no permitted website.");
   const targetOrigin = new URL(target).origin;
   if (permissionOrigin !== targetOrigin) throw new Error("Website permission did not match this Shopping Task.");
@@ -114,6 +121,16 @@ async function inspect(taskId: string) {
 async function propose(taskId: string, input: { candidateId?: string; candidate?: any; source: "recommended" | "manual" | "agent" }) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposal`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), ...input }) }); const flow = await ensureFlow(taskId); await saveFlow({ ...flow, phase: "product_review_required", retries: 0, message: "Review this exact product before checkout" }); return result; }
 async function confirmProposal(taskId: string, proposalId: string, productUrl: string) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposals/${proposalId}/confirm`, { method: "POST", body: JSON.stringify({ installationId: await installationId() }) }); const flow = await ensureFlow(taskId); if (new URL((await chrome.tabs.get(flow.tabId)).url ?? "about:blank").href !== productUrl) await chrome.tabs.update(flow.tabId, { url: productUrl, active: true }); await report(taskId, "navigating", "Product confirmed. Opening protected checkout."); await saveFlow({ ...flow, phase: "selection_confirmed", retries: 0, message: "Product confirmed. Opening checkout" }); schedule(taskId, 700); return result; }
 async function dismissProposal(taskId: string, proposalId: string) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposals/${proposalId}/dismiss`, { method: "POST", body: JSON.stringify({ installationId: await installationId() }) }); const flow = await ensureFlow(taskId); await saveFlow({ ...flow, phase: "selection_required", retries: 0, message: "Keep browsing—SpendSeal will notice another product" }); return result; }
+
+async function changeProduct(taskId: string) {
+  const flow = await ensureFlow(taskId);
+  const result = await api(`/api/v1/browser/tasks/${taskId}/reselect-product`, { method: "POST", body: JSON.stringify({ installationId: await installationId() }) });
+  await chrome.storage.local.remove("executionGrant");
+  const target = shoppingSearchUrl(result.task);
+  await chrome.tabs.update(flow.tabId, { url: target, active: true });
+  await saveFlow({ ...flow, phase: "searching", retries: 0, message: "Previous checkout cancelled. Choose another product" });
+  return result;
+}
 
 async function choosePayment(taskId: string, paymentPreference: "cash_on_delivery" | "online") {
   const flow = await ensureFlow(taskId);
@@ -203,7 +220,15 @@ async function approveAndContinue(taskId: string) {
   const callback = await chrome.identity.launchWebAuthFlow({ url: continuation.authorizeUrl, interactive: true });
   if (!callback) { await saveFlow({ ...flow, phase: "pending_approval", message: "Passkey confirmation is still required" }); return { cancelled: true }; }
   const returned = new URL(callback);
-  if (returned.searchParams.get("state") !== stateValue || returned.searchParams.get("result") !== "approved" || returned.searchParams.get("task_id") !== taskId) throw new Error("The secure approval return did not match this Shopping Task.");
+  if (returned.searchParams.get("state") !== stateValue || returned.searchParams.get("task_id") !== taskId) throw new Error("The secure approval return did not match this Shopping Task.");
+  if (returned.searchParams.get("result") === "cancelled") {
+    await chrome.storage.local.remove("executionGrant");
+    const details = await api(`/api/v1/browser/tasks/${taskId}`);
+    await chrome.tabs.update(flow.tabId, { url: shoppingSearchUrl(details.task), active: true });
+    await saveFlow({ ...flow, phase: "searching", retries: 0, message: "Previous checkout cancelled. Choose another product" });
+    return { cancelled: true, task: details.task };
+  }
+  if (returned.searchParams.get("result") !== "approved") throw new Error("The secure approval return did not approve this Shopping Task.");
   await saveFlow({ ...flow, phase: "revalidating", retries: 0, message: "Protection check running" });
   return revalidate(taskId);
 }
@@ -283,4 +308,6 @@ async function currentFlow(): Promise<Flow | null> { return (await chrome.storag
 async function saveFlow(flow: Flow) { await chrome.storage.local.set({ flow, activeTaskId: flow.taskId }); notify(); }
 function notify() { void chrome.runtime.sendMessage({ type: "flowUpdated" }).catch(() => undefined); }
 async function installationId() { const value = (await chrome.storage.local.get(["installationId"])).installationId; if (!value) throw new Error("Extension is not registered."); return value; }
+function shoppingStartUrl(task: any) { return task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query ?? "")}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query ?? "")}` : task.allowedOrigin); }
+function shoppingSearchUrl(task: any) { return task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query ?? "")}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query ?? "")}` : task.allowedOrigin; }
 function base64url(bytes: Uint8Array) { let binary = ""; bytes.forEach((byte) => binary += String.fromCharCode(byte)); return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", ""); }

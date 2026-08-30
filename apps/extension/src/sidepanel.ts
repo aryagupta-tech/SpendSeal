@@ -42,7 +42,7 @@ function render(task: any, candidates: any[], proposal: any = null) {
   lastRenderKey = renderKey;
   detail.innerHTML = `<article class="seal"><span class="status">${pretty(task.status)}</span><h2>${escapeHtml(task.query ?? "Exact product")}</h2><div class="meta">Protected maximum: ${rupees(task.maxTotalPaise)} · quantity 1 · no substitutions or add-ons</div><div class="progress"><i></i><span>${progressMessage(task.status)}</span></div></article>`;
   actions.innerHTML = "";
-  if (task.mode === "prepare_only") { const safety = document.createElement("article"); safety.className = "task"; safety.innerHTML = `<b>Demo safety is on</b><div class="meta">SpendSeal will verify this checkout, but it will not place a real COD or online order until live ordering is enabled for this buyer.</div>`; actions.append(safety); }
+  if (task.mode === "prepare_only") { const safety = document.createElement("article"); safety.className = "task"; safety.innerHTML = `<b>Demo safety is on</b><div class="meta">SpendSeal will verify this checkout, but this task was created while the deployment-wide live-order kill switch was off.</div>`; actions.append(safety); }
   if (["waiting_for_extension", "created"].includes(task.status)) addAction("Start protected search", () => startTask(task));
   if (task.status === "searching") addAction("Read matching products", async () => { const result = await send({ type: "inspect", taskId: task.id }); if (result.error) return show(result.error, true); if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); } });
   if (task.status === "selection_required") {
@@ -73,6 +73,11 @@ function render(task: any, candidates: any[], proposal: any = null) {
   if (task.status === "pending_approval") addAction("Review and confirm protected order", () => act({ type: "approveAndContinue", taskId: task.id }, (result) => { if (!result.cancelled) show("Approved. SpendSeal is re-checking every protected detail."); }));
   if (task.status === "user_action_required") { const box = document.createElement("article"); box.className = "task danger"; box.innerHTML = `<b>Your action is needed on the website</b><div class="meta">Complete login, address, CAPTCHA, OTP, or the visible website step. SpendSeal never bypasses it.</div>`; actions.append(box); addAction("Resume protected checkout", () => act({ type: "resume", taskId: task.id }, () => show("Resuming safely."))); }
   if (task.status === "prepared") show("PURCHASE_PREPARED — protection passed and no live order was submitted.");
+  if (["selection_confirmed", "navigating", "checkout_configuring", "payment_choice_required", "payment_action_required", "pending_approval", "approved", "user_action_required", "denied", "failed"].includes(task.status)) {
+    const button = document.createElement("button"); button.className = "secondary"; button.textContent = "← Choose another product";
+    button.onclick = () => void act({ type: "changeProduct", taskId: task.id }, (result) => { render(result.task, [], null); show("Previous checkout and approval cancelled. Choose another product."); });
+    actions.append(button);
+  }
   if (["checkout_configuring", "navigating", "approved"].includes(task.status)) addTroubleshooting(task.id);
 }
 function addTroubleshooting(taskId: string) { const box = document.createElement("details"); box.className = "troubleshooting"; box.innerHTML = `<summary>Troubleshooting</summary><p>Use this only if the website stopped changing.</p>`; const button = document.createElement("button"); button.className = "quiet"; button.textContent = "Retry current step"; button.onclick = () => void act({ type: "retry", taskId }, () => show("Retrying the current visible step.")); box.append(button); actions.append(box); }

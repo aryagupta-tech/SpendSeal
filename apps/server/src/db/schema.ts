@@ -5,7 +5,7 @@ const updatedAt = () => timestamp("updated_at", { withTimezone: true, mode: "str
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(), username: text("username").notNull().unique(), displayName: text("display_name").notNull(),
-  status: text("status").notNull().default("active"), createdAt: createdAt(),
+  status: text("status").notNull().default("active"), browserLivePurchaseEnabled: boolean("browser_live_purchase_enabled").notNull().default(false), createdAt: createdAt(),
 });
 
 export const merchants = pgTable("merchants", {

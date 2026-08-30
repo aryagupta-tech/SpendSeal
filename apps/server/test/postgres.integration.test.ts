@@ -253,12 +253,26 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect((await browserAgent.operatorState(task.id, buyer.id)).snapshot).toMatchObject({ url: snapshot.url, screenshotIncluded: false, sensitiveContentRemoved: true });
   });
 
-  it("enables live task mode only for the explicit owner allowlist", async () => {
+  it("lets every authenticated buyer opt into live task mode without an owner allowlist", async () => {
     const owner = await user("browser-live-owner"); const other = await user("browser-prepare-only");
-    const controlled = new BrowserAgentService(pool, true, true, [owner.id]);
+    const controlled = new BrowserAgentService(pool, true, true);
     const input = { site: "flipkart_in" as const, query: "wireless mouse", maxTotalPaise: 100_000, requireRefundable: false, minimumReturnWindowDays: null, latestDeliveryDate: null, expiresInMinutes: 10 };
+    expect((await controlled.createTask(owner.id, input)).mode).toBe("prepare_only");
+    await controlled.setLiveModePreference(owner.id, true);
+    await controlled.setLiveModePreference(other.id, true);
     expect((await controlled.createTask(owner.id, input)).mode).toBe("live");
-    expect((await controlled.createTask(other.id, input)).mode).toBe("prepare_only");
+    expect((await controlled.createTask(other.id, input)).mode).toBe("live");
+  });
+
+  it("lets the buyer abandon final checkout and safely choose another product", async () => {
+    const setup = await approvedBrowserTask("browser-reselect-buyer");
+    const restarted = await browserAgent.restartProductSelection(setup.task.id, setup.buyer.id, setup.installationId);
+    expect(restarted).toMatchObject({ status: "searching", selectedCandidateId: null, purchasePermitId: null, checkoutSnapshotHash: null, paymentPreference: null });
+    const permit = await pool.query("SELECT status FROM browser_purchase_permits WHERE id=$1", [setup.permitId]);
+    expect(permit.rows[0].status).toBe("denied");
+    const events = await browserAgent.audit(setup.task.id, setup.buyer.id);
+    expect(events.events.at(-1)?.eventType).toBe("PRODUCT_RESELECTION_REQUESTED");
+    expect(events.verification).toMatchObject({ valid: true, brokenAt: null });
   });
 
   it("rejects audit mutation and detects offline tampering", async () => {

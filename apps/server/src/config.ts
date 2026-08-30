@@ -19,7 +19,6 @@ export type Config = {
   extensionOauthClientId: string;
   browserAgentEnabled: boolean;
   browserLivePurchaseEnabled: boolean;
-  browserLiveBuyerIds: string[];
   openAiCreditsLiveEnabled: boolean;
   genericWebLiveEnabled: boolean;
 };
@@ -47,8 +46,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     localRazorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || null,
     extensionOauthClientId: process.env.EXTENSION_OAUTH_CLIENT_ID ?? "spendseal-browser-extension",
     browserAgentEnabled: process.env.BROWSER_AGENT_ENABLED !== "false",
+    // This is the deployment-wide kill switch. Each buyer must still opt in from SpendSeal.
     browserLivePurchaseEnabled: process.env.BROWSER_LIVE_PURCHASE_ENABLED === "true",
-    browserLiveBuyerIds: (process.env.BROWSER_LIVE_BUYER_IDS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     openAiCreditsLiveEnabled: process.env.OPENAI_CREDITS_LIVE_ENABLED === "true",
     genericWebLiveEnabled: process.env.GENERIC_WEB_LIVE_ENABLED === "true",
     ...overrides,
