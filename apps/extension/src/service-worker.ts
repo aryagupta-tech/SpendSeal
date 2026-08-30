@@ -1,8 +1,10 @@
+import { isProductUrlForSite, type AdapterSite } from "./adapters";
 declare const chrome: any;
 const API = "https://spendseal.vercel.app";
 const CLIENT_ID = "spendseal-browser-extension";
 const SCOPES = ["browser:tasks:read", "browser:observations:write", "browser:execute"];
 const running = new Set<string>();
+const manualProductDetections = new Set<string>();
 type Flow = { taskId: string; tabId: number; phase: string; retries: number; message: string };
 
 chrome.runtime.onInstalled.addListener(() => { chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }); chrome.alarms.create("spendseal-operator", { periodInMinutes: 0.5 }); });
@@ -11,9 +13,20 @@ chrome.runtime.onMessage.addListener((message: any, sender: any, respond: (value
   void handle(message, sender).then(respond).catch((error) => respond({ error: error instanceof Error ? error.message : "Extension request failed" }));
   return true;
 });
-chrome.tabs.onUpdated.addListener((tabId: number, change: any) => {
+chrome.tabs.onUpdated.addListener((tabId: number, change: any, tab: any) => {
   if (change.status !== "complete") return;
-  void currentFlow().then(async (flow) => { if (flow?.tabId === tabId) { await observeVisiblePage(flow).catch(() => undefined); await detectManualProduct(flow).catch(() => undefined); return advance(flow.taskId); } });
+  void currentFlow().then(async (flow) => {
+    if (!flow) return;
+    if (flow.tabId === tabId) {
+      await observeVisiblePage(flow).catch(() => undefined);
+      await detectManualProduct(flow, tabId, tab?.url).catch(() => undefined);
+      return advance(flow.taskId);
+    }
+    await detectManualProduct(flow, tabId, tab?.url).catch(() => undefined);
+  });
+});
+chrome.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => {
+  void currentFlow().then((flow) => flow ? detectManualProduct(flow, tabId).catch(() => undefined) : undefined);
 });
 
 async function handle(message: any, sender: any) {
@@ -30,6 +43,7 @@ async function handle(message: any, sender: any) {
   if (message.type === "approveAndContinue") return approveAndContinue(message.taskId);
   if (message.type === "resume" || message.type === "retry") return advance(message.taskId, true);
   if (message.type === "checkoutChanged") { const flow = await currentFlow(); if (flow && sender.tab?.id === flow.tabId) return advance(flow.taskId, true); return { ignored: true }; }
+  if (message.type === "manualProductPageChanged") { const flow = await currentFlow(); if (flow && sender.tab?.id) return detectManualProduct(flow, sender.tab.id, sender.tab.url); return { ignored: true }; }
   if (message.type === "revalidate") return revalidate(message.taskId);
   if (message.type === "finalize") return finalize(message.taskId);
   if (message.type === "disconnect") { await disconnect(); return { connected: false }; }
@@ -222,7 +236,34 @@ async function retryOrPause(taskId: string, flow: Flow, detail: string) {
   await report(taskId, "user_action_required", detail); await saveFlow({ ...flow, phase: "user_action_required", message: detail }); return { userActionRequired: true, reason: detail };
 }
 function schedule(taskId: string, delay: number) { setTimeout(() => { void advance(taskId); }, delay); }
-async function detectManualProduct(flow: Flow) { const details = await api(`/api/v1/browser/tasks/${flow.taskId}`); if (!["searching", "selection_required", "product_review_required"].includes(details.task.status)) return; const observed = await commandTab(flow.tabId, "inspectProduct", { site: details.task.site, query: details.task.query, maxTotalPaise: details.task.maxTotalPaise }); if (observed.kind !== "product") return; const proposed = details.proposal && details.candidates?.find((candidate: any) => candidate.id === details.proposal.candidateId); if (proposed?.canonicalProductId === observed.candidate.canonicalProductId) return; await propose(flow.taskId, { candidate: observed.candidate, source: "manual" }); }
+async function detectManualProduct(flow: Flow, tabId = flow.tabId, knownUrl?: string) {
+  if (manualProductDetections.has(flow.taskId)) return { detecting: true };
+  manualProductDetections.add(flow.taskId);
+  try {
+    const details = await api(`/api/v1/browser/tasks/${flow.taskId}`);
+    if (["submitting", "prepared", "completed", "denied", "failed", "expired", "reconciliation_required"].includes(details.task.status)) return { ignored: true };
+    const tab = knownUrl ? { url: knownUrl } : await chrome.tabs.get(tabId).catch(() => null);
+    const tabUrl = tab?.url;
+    if (!tabUrl || !isProductUrlForTask(details.task.site, tabUrl)) return { ignored: true };
+    const observed = await commandTab(tabId, "inspectProduct", { site: details.task.site, query: details.task.query, maxTotalPaise: details.task.maxTotalPaise });
+    if (observed.kind !== "product") return { ignored: true };
+    const proposed = details.proposal && details.candidates?.find((candidate: any) => candidate.id === details.proposal.candidateId);
+    if (tabId !== flow.tabId) {
+      flow = { ...flow, tabId, phase: "manual_product_opened", retries: 0, message: "Review the product you opened" };
+      await saveFlow(flow);
+    }
+    if (proposed?.canonicalProductId === observed.candidate.canonicalProductId) return { unchanged: true };
+    const result = await propose(flow.taskId, { candidate: observed.candidate, source: "manual" });
+    await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+    return result;
+  } finally {
+    manualProductDetections.delete(flow.taskId);
+  }
+}
+function isProductUrlForTask(site: string, rawUrl: string) {
+  if (site !== "amazon_in" && site !== "flipkart_in") return false;
+  return isProductUrlForSite(site as AdapterSite, rawUrl);
+}
 async function observeVisiblePage(flow: Flow) { const snapshot = await commandTab(flow.tabId, "redactedSnapshot"); if (snapshot.kind !== "redacted_page") return; await api(`/api/v1/browser/tasks/${flow.taskId}/redacted-page`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), snapshot: snapshot.snapshot }) }); }
 async function pollOperator() { const flow = await currentFlow(); if (!flow) return; const response = await api(`/api/v1/browser/tasks/${flow.taskId}/operator-command?installationId=${encodeURIComponent(await installationId())}`).catch(() => null); if (!response?.command) return; const command = response.command; let status: "completed" | "blocked" | "failed" = "completed"; let result: any; try { if (command.action.type === "navigate") { await chrome.tabs.update(flow.tabId, { url: command.action.url, active: true }); result = { navigated: true }; } else result = await commandTab(flow.tabId, "operatorAction", { operatorAction: command.action }); if (result?.blocked) status = "blocked"; else if (result?.error) status = "failed"; } catch (error) { status = "failed"; result = { error: error instanceof Error ? error.message : "Operator action failed" }; } const snapshotResult = await commandTab(flow.tabId, "redactedSnapshot").catch(() => null); await api(`/api/v1/browser/tasks/${flow.taskId}/operator-commands/${command.id}/result`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), status, result, snapshot: snapshotResult?.snapshot }) }); notify(); }
 async function getFxQuote(taskId: string) { return api(`/api/v1/browser/tasks/${taskId}/fx-quote`).then((value) => value.fxQuote); }

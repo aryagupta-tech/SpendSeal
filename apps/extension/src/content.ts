@@ -8,10 +8,25 @@ declare const chrome: any;
     void run(message).then(respond).catch((error) => respond({ error: error instanceof Error ? error.message : "Inspection failed" })); return true;
   });
   let changeTimer: number | null = null;
+  let lastManualProductSignal = "";
   document.addEventListener("change", () => {
     if (changeTimer !== null) window.clearTimeout(changeTimer);
     changeTimer = window.setTimeout(() => { void chrome.runtime.sendMessage({ type: "checkoutChanged" }).catch(() => undefined); }, 500);
   }, true);
+  const signalManualProduct = () => {
+    const site = siteFor(location.hostname);
+    if (site !== "amazon_in" && site !== "flipkart_in") return;
+    const id = productId(location.href, site);
+    if (!id) return;
+    const signature = `${location.href.split("#")[0]}:${id}`;
+    if (signature === lastManualProductSignal) return;
+    lastManualProductSignal = signature;
+    void chrome.runtime.sendMessage({ type: "manualProductPageChanged" }).catch(() => undefined);
+  };
+  window.addEventListener("pageshow", signalManualProduct);
+  window.addEventListener("popstate", signalManualProduct);
+  window.setInterval(signalManualProduct, 750);
+  signalManualProduct();
   async function run(message: any) {
     if (window.top !== window) return { error: "Embedded checkout frames are refused." };
     const site = siteFor(location.hostname); if (!site) return { kind: "inspect_only", reason: "SITE_NOT_SUPPORTED" };

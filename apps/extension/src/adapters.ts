@@ -22,6 +22,10 @@ export function canonicalProductId(site: AdapterSite, raw: string, html = ""): s
     ?? null;
 }
 
+export function isProductUrlForSite(site: AdapterSite, raw: string): boolean {
+  try { return adapterForUrl(raw) === site && Boolean(canonicalProductId(site, raw)); } catch { return false; }
+}
+
 export function parseRupees(value: string): number {
   const match = value.replaceAll(",", "").match(/(?:₹|Rs\.?|INR)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i);
   return match?.[1] ? Math.round(Number(match[1]) * 100) : 0;
