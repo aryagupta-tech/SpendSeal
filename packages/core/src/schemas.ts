@@ -6,9 +6,9 @@ export const MERCHANT_ROLES = ["owner", "admin", "catalog_manager", "auditor"] a
 export const API_KEY_SCOPES = ["catalog:read", "catalog:write", "orders:read", "audit:read"] as const;
 export const MCP_SCOPES = ["catalog:read", "intents:create", "intents:read", "checkout:prepare", "audit:read", "shopping:create", "shopping:read", "shopping:audit"] as const;
 export const BROWSER_SCOPES = ["browser:tasks:read", "browser:observations:write", "browser:execute"] as const;
-export const SHOPPING_SITES = ["amazon_in", "flipkart_in"] as const;
+export const SHOPPING_SITES = ["amazon_in", "flipkart_in", "openai_api", "generic_web"] as const;
 export const SHOPPING_TASK_STATUSES = [
-  "created", "waiting_for_extension", "searching", "selection_required", "navigating", "checkout_observed", "pending_approval",
+  "created", "waiting_for_extension", "searching", "selection_required", "product_review_required", "selection_confirmed", "operator_navigating", "navigating", "checkout_observed", "pending_approval",
   "checkout_configuring", "payment_choice_required", "payment_action_required",
   "approved", "policy_check", "prepared", "submitting", "completed", "user_action_required", "denied", "reconciliation_required", "failed", "expired",
 ] as const;
@@ -61,6 +61,8 @@ export const REASON_CODES = [
   "CATALOG_REFRESH_FAILED", "SITE_NOT_SUPPORTED", "DOMAIN_MISMATCH", "CHECKOUT_UNVERIFIABLE", "PRODUCT_CHANGED", "VARIANT_CHANGED",
   "SELLER_CHANGED", "QUANTITY_CHANGED", "TOTAL_CHANGED", "UNEXPECTED_CART_ITEMS", "USER_ACTION_REQUIRED", "AUTOMATION_BLOCKED",
   "LIVE_PURCHASE_DISABLED", "ADDRESS_CHANGED", "DELIVERY_CHANGED", "PAYMENT_METHOD_CHANGED", "PAYMENT_OPTION_UNAVAILABLE",
+  "PRODUCT_REVIEW_REQUIRED", "SITE_PERMISSION_REQUIRED", "SENSITIVE_FIELD_BLOCKED", "RECURRING_BILLING_DETECTED",
+  "FINAL_ACTION_UNVERIFIABLE", "FX_QUOTE_UNAVAILABLE", "ACCOUNT_CHANGED",
 ] as const;
 export const ReasonCodeSchema = z.enum(REASON_CODES);
 export type ReasonCode = z.infer<typeof ReasonCodeSchema>;
@@ -92,13 +94,17 @@ export type PaymentOrder = z.infer<typeof PaymentOrderSchema>;
 
 export const ShoppingSiteSchema = z.enum(SHOPPING_SITES);
 export type ShoppingSite = z.infer<typeof ShoppingSiteSchema>;
+export const EvidenceAssuranceSchema = z.enum(["provider_verified", "browser_observed", "agent_assisted", "prepared_only"]);
+export type EvidenceAssurance = z.infer<typeof EvidenceAssuranceSchema>;
+export const PurchaseKindSchema = z.enum(["physical_good", "api_credits", "generic_one_time"]);
+export type PurchaseKind = z.infer<typeof PurchaseKindSchema>;
 export const PaymentPreferenceSchema = z.enum(["cash_on_delivery", "online"]);
 export type PaymentPreference = z.infer<typeof PaymentPreferenceSchema>;
 export const ShoppingTaskStatusSchema = z.enum(SHOPPING_TASK_STATUSES);
 export type ShoppingTaskStatus = z.infer<typeof ShoppingTaskStatusSchema>;
 
 export const CreateShoppingTaskInputSchema = z.object({
-  site: ShoppingSiteSchema,
+  site: z.enum(["amazon_in", "flipkart_in"]),
   query: z.string().trim().min(2).max(240).optional(),
   productUrl: z.string().url().max(2048).optional(),
   maxTotalPaise: z.number().int().positive().max(100_000_000),
@@ -116,13 +122,42 @@ export const CreateShoppingTaskInputSchema = z.object({
 });
 export type CreateShoppingTaskInput = z.infer<typeof CreateShoppingTaskInputSchema>;
 
+export const CreateWebPurchaseTaskInputSchema = z.object({
+  siteUrl: z.string().url().max(2048).refine((value) => new URL(value).protocol === "https:", "Only HTTPS websites are supported."),
+  objective: z.string().trim().min(2).max(500),
+  maxTotalPaise: z.number().int().positive().max(100_000_000),
+  purchaseKind: PurchaseKindSchema.default("generic_one_time"),
+  requireRefundable: z.boolean().default(false),
+  minimumReturnWindowDays: z.number().int().min(0).max(90).nullable().default(null),
+  latestDeliveryDate: z.string().date().nullable().default(null),
+  expiresInMinutes: z.number().int().min(1).max(30).default(15),
+}).transform((value) => {
+  const url = new URL(value.siteUrl); const host = url.hostname.toLowerCase();
+  const site = host === "amazon.in" || host === "www.amazon.in" ? "amazon_in"
+    : host === "flipkart.com" || host === "www.flipkart.com" ? "flipkart_in"
+      : host === "platform.openai.com" ? "openai_api" : "generic_web";
+  const purchaseKind = site === "openai_api" ? "api_credits" : site === "amazon_in" || site === "flipkart_in" ? "physical_good" : "generic_one_time";
+  return { ...value, site, purchaseKind, allowedOrigin: url.origin };
+});
+export type CreateWebPurchaseTaskInput = z.infer<typeof CreateWebPurchaseTaskInputSchema>;
+
 export const ShoppingCandidateSchema = z.object({
   id: z.string().uuid(), taskId: z.string().uuid(), canonicalProductId: z.string().min(1), listingId: z.string().nullable(), title: z.string().min(1),
   seller: z.string().nullable(), variant: z.string().nullable(), condition: z.string().default("new"), availability: z.string(), pricePaise: z.number().int().positive(),
   currency: z.literal("INR"), productUrl: z.string().url(), snapshotHash: z.string(), observedAt: z.string().datetime(), adapterId: ShoppingSiteSchema,
-  adapterVersion: z.string(), selected: z.boolean(),
+  adapterVersion: z.string(), selected: z.boolean(), imageUrl: z.string().url().nullable().default(null),
+  rating: z.number().min(0).max(5).nullable().default(null), reviewCount: z.number().int().nonnegative().nullable().default(null),
+  deliveryEstimate: z.string().max(160).nullable().default(null), rankingReasons: z.array(z.string().max(160)).max(6).default([]),
+  proposalSource: z.enum(["recommended", "manual", "agent"]).default("recommended"), queryMismatch: z.boolean().default(false),
 });
 export type ShoppingCandidate = z.infer<typeof ShoppingCandidateSchema>;
+
+export const ProductSelectionProposalSchema = z.object({
+  id: z.string().uuid(), taskId: z.string().uuid(), candidateId: z.string().uuid(), source: z.enum(["recommended", "manual", "agent"]),
+  status: z.enum(["pending", "confirmed", "replaced", "dismissed", "expired"]), queryMismatch: z.boolean(),
+  warning: z.string().max(240).nullable(), expiresAt: z.string().datetime(), confirmedAt: z.string().datetime().nullable(), createdAt: z.string().datetime(),
+});
+export type ProductSelectionProposal = z.infer<typeof ProductSelectionProposalSchema>;
 
 export const CheckoutObservationSchema = z.object({
   site: ShoppingSiteSchema, sourceUrl: z.string().url(), canonicalProductId: z.string().min(1), listingId: z.string().nullable(), title: z.string().min(1),
@@ -132,7 +167,11 @@ export const CheckoutObservationSchema = z.object({
   refundable: z.boolean().nullable(), returnWindowDays: z.number().int().nonnegative().nullable(), deliveryDate: z.string().date().nullable(),
   maskedAddressLabel: z.string().max(80).nullable(), addressFingerprint: z.string().max(128).nullable(), paymentMethodType: z.string().max(40).nullable(),
   paymentPreference: PaymentPreferenceSchema,
-  observedAt: z.string().datetime(), adapterId: ShoppingSiteSchema, adapterVersion: z.string().min(1), evidenceAssurance: z.literal("browser_observed"),
+  observedAt: z.string().datetime(), adapterId: ShoppingSiteSchema, adapterVersion: z.string().min(1), evidenceAssurance: EvidenceAssuranceSchema,
+  accountFingerprint: z.string().max(128).nullable().default(null), maskedAccountLabel: z.string().max(80).nullable().default(null),
+  recurring: z.boolean().default(false), finalActionLabel: z.string().max(120).nullable().default(null),
+  providerCurrency: z.string().length(3).nullable().default(null), providerAmountMinor: z.number().int().positive().nullable().default(null),
+  fxQuote: z.object({ base: z.literal("USD"), quote: z.literal("INR"), rate: z.number().positive(), bufferPercent: z.literal(10), source: z.string().min(1), quotedAt: z.string().datetime() }).nullable().default(null),
 });
 export type CheckoutObservation = z.infer<typeof CheckoutObservationSchema>;
 
@@ -141,11 +180,31 @@ export const ShoppingTaskSchema = z.object({
   maxTotalPaise: z.number().int().positive(), requireRefundable: z.boolean(), minimumReturnWindowDays: z.number().int().nonnegative().nullable(),
   latestDeliveryDate: z.string().date().nullable(), quantity: z.literal(1), currency: z.literal("INR"), status: ShoppingTaskStatusSchema,
   paymentPreference: PaymentPreferenceSchema.nullable(),
+  allowedOrigin: z.string().url().nullable().default(null), purchaseKind: PurchaseKindSchema.default("physical_good"),
+  proposedCandidateId: z.string().uuid().nullable().default(null), selectionConfirmedAt: z.string().datetime().nullable().default(null),
   selectedCandidateId: z.string().uuid().nullable(), purchasePermitId: z.string().uuid().nullable(), checkoutSnapshotHash: z.string().nullable(),
   confirmedAt: z.string().datetime().nullable(), denialReason: ReasonCodeSchema.nullable(), mode: z.enum(["prepare_only", "live"]),
   expiresAt: z.string().datetime(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
 });
 export type ShoppingTask = z.infer<typeof ShoppingTaskSchema>;
+
+export const RedactedPageSnapshotSchema = z.object({
+  url: z.string().url(), title: z.string().max(240), site: ShoppingSiteSchema, capturedAt: z.string().datetime(),
+  text: z.array(z.string().max(240)).max(120), controls: z.array(z.object({ ref: z.string().max(80), role: z.string().max(40), label: z.string().max(160), disabled: z.boolean() })).max(120),
+  prices: z.array(z.object({ label: z.string().max(120), amount: z.string().max(80) })).max(30),
+  sensitiveContentRemoved: z.literal(true), screenshotIncluded: z.literal(false),
+});
+export type RedactedPageSnapshot = z.infer<typeof RedactedPageSnapshotSchema>;
+
+export const BrowserOperatorActionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("navigate"), url: z.string().url().max(2048) }),
+  z.object({ type: z.literal("click"), ref: z.string().min(1).max(80) }),
+  z.object({ type: z.literal("scroll"), direction: z.enum(["up", "down"]), amount: z.number().int().min(100).max(2000).default(700) }),
+  z.object({ type: z.literal("type"), ref: z.string().min(1).max(80), value: z.string().max(500), sensitive: z.literal(false) }),
+  z.object({ type: z.literal("select"), ref: z.string().min(1).max(80), value: z.string().max(160) }),
+  z.object({ type: z.literal("wait"), milliseconds: z.number().int().min(250).max(5000) }),
+]);
+export type BrowserOperatorAction = z.infer<typeof BrowserOperatorActionSchema>;
 
 export const BrowserPurchasePermitSchema = z.object({
   id: z.string().uuid(), taskId: z.string().uuid(), buyerId: z.string().uuid(), checkoutSnapshot: CheckoutObservationSchema,

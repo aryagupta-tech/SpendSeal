@@ -5,14 +5,15 @@ const SCOPES = ["browser:tasks:read", "browser:observations:write", "browser:exe
 const running = new Set<string>();
 type Flow = { taskId: string; tabId: number; phase: string; retries: number; message: string };
 
-chrome.runtime.onInstalled.addListener(() => chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }));
+chrome.runtime.onInstalled.addListener(() => { chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }); chrome.alarms.create("spendseal-operator", { periodInMinutes: 0.5 }); });
+chrome.alarms.onAlarm.addListener((alarm: any) => { if (alarm.name === "spendseal-operator") void pollOperator(); });
 chrome.runtime.onMessage.addListener((message: any, sender: any, respond: (value: any) => void) => {
   void handle(message, sender).then(respond).catch((error) => respond({ error: error instanceof Error ? error.message : "Extension request failed" }));
   return true;
 });
 chrome.tabs.onUpdated.addListener((tabId: number, change: any) => {
   if (change.status !== "complete") return;
-  void currentFlow().then((flow) => { if (flow?.tabId === tabId) return advance(flow.taskId); });
+  void currentFlow().then(async (flow) => { if (flow?.tabId === tabId) { await observeVisiblePage(flow).catch(() => undefined); await detectManualProduct(flow).catch(() => undefined); return advance(flow.taskId); } });
 });
 
 async function handle(message: any, sender: any) {
@@ -22,7 +23,9 @@ async function handle(message: any, sender: any) {
   if (message.type === "task") return api(`/api/v1/browser/tasks/${message.taskId}`);
   if (message.type === "openTask") return openTask(message.task);
   if (message.type === "inspect") return inspect(message.taskId);
-  if (message.type === "select") return select(message.taskId, message.candidateId, message.productUrl);
+  if (message.type === "propose") return propose(message.taskId, { candidateId: message.candidateId, source: "recommended" });
+  if (message.type === "confirmProposal") return confirmProposal(message.taskId, message.proposalId, message.productUrl);
+  if (message.type === "dismissProposal") return dismissProposal(message.taskId, message.proposalId);
   if (message.type === "choosePayment") return choosePayment(message.taskId, message.paymentPreference);
   if (message.type === "approveAndContinue") return approveAndContinue(message.taskId);
   if (message.type === "resume" || message.type === "retry") return advance(message.taskId, true);
@@ -57,8 +60,12 @@ async function state() {
 
 async function openTask(task: any) {
   await chrome.storage.local.set({ activeTaskId: task.id });
+  const target = task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query)}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query)}` : task.allowedOrigin);
+  if (!target) throw new Error("This task has no permitted website.");
+  const originPattern = `${new URL(target).origin}/*`; const granted = await chrome.permissions.request({ origins: [originPattern] });
+  if (!granted) throw new Error("SpendSeal needs access to this website for this task.");
+  await api(`/api/v1/browser/tasks/${task.id}/site-grant`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), origin: new URL(target).origin }) });
   await report(task.id, "searching", task.productUrl ? "Opening the exact supplied product for your selection." : "Opening product search.");
-  const target = task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query)}` : `https://www.flipkart.com/search?q=${encodeURIComponent(task.query)}`);
   const tab = await chrome.tabs.create({ url: target, active: true });
   if (!tab.id) throw new Error("SpendSeal could not create the shopping tab.");
   await saveFlow({ taskId: task.id, tabId: tab.id, phase: "searching", retries: 0, message: task.productUrl ? "Reading the exact supplied product" : "Finding matching products" });
@@ -79,13 +86,9 @@ async function inspect(taskId: string) {
   throw new Error(observed.reason ?? "SpendSeal could not confidently inspect this page.");
 }
 
-async function select(taskId: string, candidateId: string, productUrl: string) {
-  const result = await api(`/api/v1/browser/tasks/${taskId}/select`, { method: "POST", body: JSON.stringify({ candidateId }) });
-  const flow = await ensureFlow(taskId);
-  await saveFlow({ ...flow, phase: "opening_listing", retries: 0, message: "Opening the selected product" });
-  await chrome.tabs.update(flow.tabId, { url: productUrl, active: true });
-  return result;
-}
+async function propose(taskId: string, input: { candidateId?: string; candidate?: any; source: "recommended" | "manual" | "agent" }) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposal`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), ...input }) }); const flow = await ensureFlow(taskId); await saveFlow({ ...flow, phase: "product_review_required", retries: 0, message: "Review this exact product before checkout" }); return result; }
+async function confirmProposal(taskId: string, proposalId: string, productUrl: string) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposals/${proposalId}/confirm`, { method: "POST", body: JSON.stringify({ installationId: await installationId() }) }); const flow = await ensureFlow(taskId); if (new URL((await chrome.tabs.get(flow.tabId)).url ?? "about:blank").href !== productUrl) await chrome.tabs.update(flow.tabId, { url: productUrl, active: true }); await report(taskId, "navigating", "Product confirmed. Opening protected checkout."); await saveFlow({ ...flow, phase: "selection_confirmed", retries: 0, message: "Product confirmed. Opening checkout" }); schedule(taskId, 700); return result; }
+async function dismissProposal(taskId: string, proposalId: string) { const result = await api(`/api/v1/browser/tasks/${taskId}/product-proposals/${proposalId}/dismiss`, { method: "POST", body: JSON.stringify({ installationId: await installationId() }) }); const flow = await ensureFlow(taskId); await saveFlow({ ...flow, phase: "selection_required", retries: 0, message: "Keep browsing—SpendSeal will notice another product" }); return result; }
 
 async function choosePayment(taskId: string, paymentPreference: "cash_on_delivery" | "online") {
   const flow = await ensureFlow(taskId);
@@ -117,7 +120,8 @@ async function advance(taskId: string, userInitiated = false): Promise<any> {
     if (task.status === "approved") return revalidate(taskId);
     if (task.status === "submitting") return finalize(taskId);
     if (task.status === "payment_choice_required" && !task.paymentPreference) return { task };
-    if (task.status === "selection_required") return { task };
+    if (["selection_required", "product_review_required"].includes(task.status)) return { task };
+    if (task.status === "selection_confirmed") { await report(taskId, "navigating", "Opening checkout for the confirmed product."); schedule(taskId, 300); return { task }; }
     if (task.status === "searching" && !task.selectedCandidateId) return inspect(taskId);
     if (task.status === "navigating" && task.selectedCandidateId && flow.phase !== "checkout_configuring") {
       await saveFlow({ ...flow, phase: "opening_buy_now", message: "Opening checkout" });
@@ -130,7 +134,8 @@ async function advance(taskId: string, userInitiated = false): Promise<any> {
     if (["checkout_configuring", "payment_choice_required", "payment_action_required", "user_action_required"].includes(task.status)) {
       if (task.status === "user_action_required" && !userInitiated) return { task };
       if (task.status === "user_action_required") await report(taskId, "checkout_configuring", "Resuming the visible checkout after user action.");
-      const configured = await commandTab(flow.tabId, "configureCheckout", { paymentPreference: task.paymentPreference });
+      const fxQuote = task.site === "openai_api" ? await getFxQuote(taskId) : null;
+      const configured = await commandTab(flow.tabId, "configureCheckout", { paymentPreference: task.paymentPreference, fxQuote });
       if (configured.userActionRequired) {
         await report(taskId, "user_action_required", configured.reason);
         await saveFlow({ ...flow, phase: "user_action_required", message: configured.reason }); return configured;
@@ -180,7 +185,8 @@ async function approveAndContinue(taskId: string) {
 
 async function revalidate(taskId: string) {
   const details = await api(`/api/v1/browser/tasks/${taskId}`); const flow = await ensureFlow(taskId);
-  const observed = await commandTab(flow.tabId, "inspect", { paymentPreference: details.task.paymentPreference });
+  const fxQuote = details.task.site === "openai_api" ? await getFxQuote(taskId) : null;
+  const observed = await commandTab(flow.tabId, "inspect", { paymentPreference: details.task.paymentPreference, fxQuote });
   if (observed.kind !== "checkout") throw new Error("Keep the final checkout page visible for the protection re-check.");
   const claim = await api(`/api/v1/browser/tasks/${taskId}/execution-claim`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), observation: observed.observation }) });
   if (claim.status !== "submitting") {
@@ -209,6 +215,10 @@ async function retryOrPause(taskId: string, flow: Flow, detail: string) {
   await report(taskId, "user_action_required", detail); await saveFlow({ ...flow, phase: "user_action_required", message: detail }); return { userActionRequired: true, reason: detail };
 }
 function schedule(taskId: string, delay: number) { setTimeout(() => { void advance(taskId); }, delay); }
+async function detectManualProduct(flow: Flow) { const details = await api(`/api/v1/browser/tasks/${flow.taskId}`); if (!["searching", "selection_required", "product_review_required"].includes(details.task.status)) return; const observed = await commandTab(flow.tabId, "inspectProduct", { site: details.task.site, query: details.task.query, maxTotalPaise: details.task.maxTotalPaise }); if (observed.kind !== "product") return; const proposed = details.proposal && details.candidates?.find((candidate: any) => candidate.id === details.proposal.candidateId); if (proposed?.canonicalProductId === observed.candidate.canonicalProductId) return; await propose(flow.taskId, { candidate: observed.candidate, source: "manual" }); }
+async function observeVisiblePage(flow: Flow) { const snapshot = await commandTab(flow.tabId, "redactedSnapshot"); if (snapshot.kind !== "redacted_page") return; await api(`/api/v1/browser/tasks/${flow.taskId}/redacted-page`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), snapshot: snapshot.snapshot }) }); }
+async function pollOperator() { const flow = await currentFlow(); if (!flow) return; const response = await api(`/api/v1/browser/tasks/${flow.taskId}/operator-command?installationId=${encodeURIComponent(await installationId())}`).catch(() => null); if (!response?.command) return; const command = response.command; let status: "completed" | "blocked" | "failed" = "completed"; let result: any; try { if (command.action.type === "navigate") { await chrome.tabs.update(flow.tabId, { url: command.action.url, active: true }); result = { navigated: true }; } else result = await commandTab(flow.tabId, "operatorAction", { operatorAction: command.action }); if (result?.blocked) status = "blocked"; else if (result?.error) status = "failed"; } catch (error) { status = "failed"; result = { error: error instanceof Error ? error.message : "Operator action failed" }; } const snapshotResult = await commandTab(flow.tabId, "redactedSnapshot").catch(() => null); await api(`/api/v1/browser/tasks/${flow.taskId}/operator-commands/${command.id}/result`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), status, result, snapshot: snapshotResult?.snapshot }) }); notify(); }
+async function getFxQuote(taskId: string) { return api(`/api/v1/browser/tasks/${taskId}/fx-quote`).then((value) => value.fxQuote); }
 async function reportExecution(taskId: string, executionGrant: string, status: string, detail?: string) { return api(`/api/v1/browser/tasks/${taskId}/execution-result`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), executionGrant, status, detail }) }); }
 async function disconnect() { const stored = await chrome.storage.local.get(["tokens", "installationId"]); if (stored.installationId && stored.tokens) await api(`/api/v1/browser/installations/${stored.installationId}`, { method: "DELETE" }).catch(() => undefined); if (stored.tokens?.refresh_token) await fetch(`${API}/oauth/revoke`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: stored.tokens.refresh_token }) }).catch(() => undefined); await chrome.storage.local.clear(); }
 async function report(taskId: string, status: string, detail?: string) { return api(`/api/v1/browser/tasks/${taskId}/status`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), status, detail }) }); }

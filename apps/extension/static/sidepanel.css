@@ -23,6 +23,12 @@ button { width: 100%; padding: 13px; border: 0; border-radius: 12px; background:
 #actions { display: grid; gap: 10px; margin-top: 12px; }
 .ranking-note { margin: 0; padding: 12px; border: 1px solid #29483d; border-radius: 12px; background: #0a1914; }
 .candidate .rank { display: inline-block; margin-bottom: 8px; }
+.candidate-media { display: grid; grid-template-columns: 72px 1fr; gap: 12px; align-items: start; }
+.candidate-media img { width: 72px; height: 72px; object-fit: contain; border-radius: 10px; background: #fff; }
+.candidate ul { margin: 9px 0 0; padding-left: 18px; color: #9eb2a9; font-size: 11px; }
+.candidate.warning { border-color: #8b6a32; background: #201a0d; }
+.review-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.review-actions button { margin: 0; }
 button.secondary { border: 1px solid #3c6657; background: #10231c; color: #dff8ec; }
 .choice { display: grid; gap: 10px; padding: 14px; border: 1px solid #376a58; border-radius: 14px; background: #0a1b15; }
 .choice p { margin: 0 0 4px; }

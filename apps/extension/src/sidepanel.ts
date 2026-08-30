@@ -29,23 +29,32 @@ async function openTask(task: any) {
 async function refreshActive() {
   if (!activeTaskId) return; const result = await send({ type: "pending" }); if (result.error) return;
   const task = result.tasks?.find((item: any) => item.id === activeTaskId);
-  if (task) render(task, task.status === "selection_required" ? await loadCandidates(task.id) : []);
-  else { const details = await fetchTask(activeTaskId); if (details?.task) render(details.task, details.candidates ?? []); }
+  const details = await fetchTask(activeTaskId); if (details?.task) render(details.task, details.candidates ?? [], details.proposal ?? null);
 }
 async function fetchTask(taskId: string) { const result = await send({ type: "task", taskId }); return result.error ? null : result; }
 async function loadCandidates(taskId: string) { const result = await fetchTask(taskId); return result?.candidates ?? []; }
 
-function render(task: any, candidates: any[]) {
+function render(task: any, candidates: any[], proposal: any = null) {
   activeTaskId = task.id;
   detail.innerHTML = `<article class="seal"><span class="status">${pretty(task.status)}</span><h2>${escapeHtml(task.query ?? "Exact product")}</h2><div class="meta">Protected maximum: ${rupees(task.maxTotalPaise)} · quantity 1 · no substitutions or add-ons</div><div class="progress"><i></i><span>${progressMessage(task.status)}</span></div></article>`;
   actions.innerHTML = "";
   if (["waiting_for_extension", "searching"].includes(task.status)) addAction("Find matching products", async () => { const result = await send({ type: "inspect", taskId: task.id }); if (result.error) return show(result.error, true); if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); } });
   if (task.status === "selection_required") {
-    const explanation = document.createElement("p"); explanation.className = "ranking-note"; explanation.textContent = "These are the three strongest visible matches. You choose the exact product; SpendSeal handles checkout after that."; actions.append(explanation);
+    const explanation = document.createElement("p"); explanation.className = "ranking-note"; explanation.textContent = "Recommended matches—not automatic choices. Review one below, or browse any other product on this website and SpendSeal will update itself."; actions.append(explanation);
     for (const [index, candidate] of candidates.entries()) {
       const ranking = rankingByProduct.get(candidate.canonicalProductId); const quality = ranking?.rating ? ` · ${ranking.rating}/5${ranking.reviewCount ? ` (${Number(ranking.reviewCount).toLocaleString("en-IN")} reviews)` : ""}` : "";
-      const card = document.createElement("article"); card.className = "candidate"; card.innerHTML = `<span class="rank">${index === 0 ? "BEST VISIBLE MATCH" : `MATCH #${index + 1}`}</span><b>${escapeHtml(candidate.title)}</b><div class="meta">${rupees(candidate.pricePaise)}${quality} · ${escapeHtml(candidate.seller ?? "seller not stated")}</div><button>Select this exact listing</button>`;
-      card.querySelector("button")!.addEventListener("click", () => act({ type: "select", taskId: task.id, candidateId: candidate.id, productUrl: candidate.productUrl }, (result) => { render(result.task, []); show("Selected. SpendSeal is opening and configuring checkout automatically."); })); actions.append(card);
+      const reasons = (candidate.rankingReasons ?? ranking?.reasons ?? []).map((reason: string) => `<li>${escapeHtml(reason)}</li>`).join("");
+      const card = document.createElement("article"); card.className = "candidate"; card.innerHTML = `<span class="rank">RECOMMENDED MATCH #${index + 1}</span><div class="candidate-media">${candidate.imageUrl ? `<img src="${escapeHtml(candidate.imageUrl)}" alt="">` : ""}<div><b>${escapeHtml(candidate.title)}</b><div class="meta">${rupees(candidate.pricePaise)}${quality} · ${escapeHtml(candidate.seller ?? "seller shown on product page")}</div>${reasons ? `<ul>${reasons}</ul>` : ""}</div></div><button>Review this product</button>`;
+      card.querySelector("button")!.addEventListener("click", () => act({ type: "propose", taskId: task.id, candidateId: candidate.id }, (result) => { render(result.task, [result.candidate], result.proposal); show("Take your time. Checkout will not start until you choose “Use this product”."); })); actions.append(card);
+    }
+  }
+  if (task.status === "product_review_required" && proposal) {
+    const candidate = candidates.find((item) => item.id === proposal.candidateId);
+    if (candidate) {
+      const reasons = (candidate.rankingReasons ?? []).map((reason: string) => `<li>${escapeHtml(reason)}</li>`).join(""); const card = document.createElement("article"); card.className = `candidate${proposal.warning ? " warning" : ""}`;
+      card.innerHTML = `<span class="rank">${candidate.proposalSource === "manual" ? "YOU OPENED THIS PRODUCT" : "PRODUCT REVIEW"}</span><div class="candidate-media">${candidate.imageUrl ? `<img src="${escapeHtml(candidate.imageUrl)}" alt="">` : ""}<div><b>${escapeHtml(candidate.title)}</b><div class="meta">${rupees(candidate.pricePaise)} · ${escapeHtml(candidate.seller ?? "seller shown at checkout")}${candidate.variant ? ` · ${escapeHtml(candidate.variant)}` : ""}</div>${reasons ? `<ul>${reasons}</ul>` : ""}</div></div>${proposal.warning ? `<p>${escapeHtml(proposal.warning)}</p>` : ""}<p>SpendSeal is waiting. Nothing will be added or purchased until you confirm.</p><div class="review-actions"><button class="secondary" data-action="browse">Keep browsing</button><button data-action="confirm" ${candidate.pricePaise > task.maxTotalPaise ? "disabled" : ""}>Use this product</button></div>`;
+      card.querySelector("[data-action='browse']")!.addEventListener("click", () => act({ type: "dismissProposal", taskId: task.id, proposalId: proposal.id }, (result) => { render(result.task, candidates, null); show("Keep browsing. SpendSeal will notice the next product page you open."); }));
+      card.querySelector("[data-action='confirm']")!.addEventListener("click", () => act({ type: "confirmProposal", taskId: task.id, proposalId: proposal.id, productUrl: candidate.productUrl }, (result) => { render(result.task, [], null); show("Product confirmed. SpendSeal is now preparing checkout."); })); actions.append(card);
     }
   }
   if (task.status === "payment_choice_required") {
@@ -61,13 +70,13 @@ function render(task: any, candidates: any[]) {
   if (["checkout_configuring", "navigating", "approved"].includes(task.status)) addTroubleshooting(task.id);
 }
 function addTroubleshooting(taskId: string) { const box = document.createElement("details"); box.className = "troubleshooting"; box.innerHTML = `<summary>Troubleshooting</summary><p>Use this only if the website stopped changing.</p>`; const button = document.createElement("button"); button.className = "quiet"; button.textContent = "Retry current step"; button.onclick = () => void act({ type: "retry", taskId }, () => show("Retrying the current visible step.")); box.append(button); actions.append(box); }
-function progressMessage(status: string) { const messages: Record<string, string> = { waiting_for_extension: "Waiting for the extension", searching: "Reading visible product matches", selection_required: "Waiting for your product choice", navigating: "Opening the exact product", checkout_configuring: "Using saved address and default delivery", payment_choice_required: "Waiting for payment choice", payment_action_required: "Waiting for your online method", pending_approval: "Waiting for one passkey confirmation", approved: "Protection check running", submitting: "Submitting exactly once", prepared: "Protected checkout prepared", completed: "Order confirmed", user_action_required: "Paused safely for you" }; return messages[status] ?? pretty(status); }
+function progressMessage(status: string) { const messages: Record<string, string> = { waiting_for_extension: "Waiting for the extension", searching: "Reading visible product matches", selection_required: "Review a recommendation or browse another product", product_review_required: "Waiting for your product review", selection_confirmed: "Product confirmed", operator_navigating: "ChatGPT is navigating the permitted website", navigating: "Opening the exact product", checkout_configuring: "Using saved address and default delivery", payment_choice_required: "Waiting for payment choice", payment_action_required: "Waiting for your online method", pending_approval: "Waiting for final passkey confirmation", approved: "Protection check running", submitting: "Submitting exactly once", prepared: "Protected checkout prepared", completed: "Order confirmed", user_action_required: "Paused safely for you" }; return messages[status] ?? pretty(status); }
 function addAction(label: string, handler: () => unknown) { const button = document.createElement("button"); button.textContent = label; button.onclick = () => void handler(); actions.append(button); }
 async function act(message: any, done: (value: any) => unknown) { const result = await send(message); if (result.error) show(result.error, true); else await done(result); }
 function send(message: any): Promise<any> { return chrome.runtime.sendMessage(message); }
 function show(message: string, error = false) { notice.hidden = false; notice.className = error ? "task danger" : "task success"; notice.textContent = message; }
 function byId(id: string) { return document.getElementById(id)!; }
 function rupees(paise: number) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(paise / 100); }
-function siteName(site: string) { return site === "amazon_in" ? "Amazon India" : "Flipkart"; }
+function siteName(site: string) { return site === "amazon_in" ? "Amazon India" : site === "flipkart_in" ? "Flipkart" : site === "openai_api" ? "OpenAI API billing" : "Permitted website"; }
 function pretty(value: string) { return value.replaceAll("_", " "); }
 function escapeHtml(value: string) { return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!); }

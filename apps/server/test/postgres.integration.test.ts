@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
-import { MCP_SCOPES } from "@spendseal/core";
+import { CreateWebPurchaseTaskInputSchema, MCP_SCOPES } from "@spendseal/core";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
 import { OAuthService } from "../src/oauth.js";
@@ -30,6 +30,18 @@ afterEach(() => vi.unstubAllGlobals());
 async function user(username: string) { return store.createUserWithPasskey({ username, displayName: username, rpId: "agentrail.test", credentialId: `cred_${username}`, publicKey: new Uint8Array([1, 2, 3]), counter: 0, deviceType: "singleDevice", backedUp: false, transports: ["internal"] }); }
 async function merchantProduct(ownerName = "owner") { const owner = await user(ownerName); const merchant = await store.createMerchant(owner.id, { slug: `shop-${ownerName}`, displayName: `${ownerName} Shop` }); await service.configurePayments(merchant.id, { adapter: "mock" }); const product = await store.createProduct(owner.id, merchant.id, { sku: "PLAN-1", name: "Annual Plan", description: "A real merchant product", pricePaise: 99_900, refundable: true, refundWindowDays: 7 }); return { owner, merchant, product }; }
 async function approvedIntent(buyerName = "buyer") { const buyer = await user(buyerName); const setup = await merchantProduct(`owner-${buyerName}`); const created = await service.createIntent(buyer.id, { merchantId: setup.merchant.id, productId: setup.product.id, maxTotalPaise: 110_000, priceChangePolicy: "none", requireRefundable: true, minimumRefundWindowDays: 7, expiresInMinutes: 10 }, "buyer"); const token = new URL(created.approvalUrl).searchParams.get("token")!; const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, token); expect(approval).not.toBeNull(); const confirmed = await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: `cred_${buyerName}`, counter: 1, deviceType: "singleDevice", backedUp: false }); expect(confirmed?.status).toBe("confirmed"); return { buyer, ...setup, intent: confirmed! }; }
+
+async function approvedBrowserTask(username: string) {
+  const buyer = await user(username); const installationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await browserAgent.registerInstallation({ userId: buyer.id, clientId: "spendseal-browser-extension", scopes: ["browser:tasks:read"] }, { installationId, name: "Review Test Chromium" });
+  const task = await browserAgent.createTask(buyer.id, { site: "amazon_in", query: "wireless mouse", maxTotalPaise: 100_000, requireRefundable: false, minimumReturnWindowDays: null, latestDeliveryDate: null, expiresInMinutes: 10 });
+  const [candidate] = await browserAgent.saveCandidates(buyer.id, installationId, task.id, [{ canonicalProductId: "B012345678", listingId: "B012345678", title: "Wireless mouse", seller: "Seller one", variant: "Black", condition: "new", availability: "available", pricePaise: 80_000, currency: "INR", productUrl: "https://www.amazon.in/dp/B012345678", snapshotHash: "mouse-one", observedAt: new Date().toISOString(), adapterId: "amazon_in", adapterVersion: "2.0.0" }]);
+  const proposed = await browserAgent.proposeCandidate(task.id, buyer.id, installationId, { candidateId: candidate!.id, source: "recommended" });
+  await browserAgent.confirmCandidate(task.id, buyer.id, installationId, proposed.proposal.id); await browserAgent.reportStatus(task.id, buyer.id, installationId, "navigating"); await browserAgent.setPaymentPreference(task.id, buyer.id, installationId, "online");
+  const observation = { site: "amazon_in" as const, sourceUrl: "https://www.amazon.in/gp/buy/spc", canonicalProductId: "B012345678", listingId: "B012345678", title: "Wireless mouse", seller: "Seller one", variant: "Black", condition: "new", quantity: 1, currency: "INR" as const, itemSubtotalPaise: 80_000, shippingPaise: 0, taxPaise: 0, discountPaise: 0, finalTotalPaise: 80_000, extraCartItemCount: 0, refundable: true, returnWindowDays: 7, deliveryDate: new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10), maskedAddressLabel: "PIN ••••01", addressFingerprint: "address-one", paymentPreference: "online" as const, paymentMethodType: "card", observedAt: new Date().toISOString(), adapterId: "amazon_in" as const, adapterVersion: "2.0.0", evidenceAssurance: "browser_observed" as const, accountFingerprint: null, maskedAccountLabel: null, recurring: false, finalActionLabel: "Place your order", providerCurrency: null, providerAmountMinor: null, fxQuote: null };
+  const observed = await browserAgent.observeCheckout(task.id, buyer.id, installationId, observation); expect(observed.allowed).toBe(true); await browserAgent.approve(task.id, buyer.id);
+  return { buyer, installationId, task, permitId: observed.permit!.id };
+}
 
 describe("PostgreSQL tenant and payment invariants", () => {
   it("keeps products and PurchasePermits isolated across merchants and buyers", async () => {
@@ -152,7 +164,14 @@ describe("PostgreSQL tenant and payment invariants", () => {
       adapterId: "amazon_in",
       adapterVersion: "1.0.0",
     }]);
-    await browserAgent.selectCandidate(task.id, buyer.id, candidates[0]!.id);
+    const review = await browserAgent.proposeCandidate(task.id, buyer.id, installationId, { candidateId: candidates[0]!.id, source: "recommended" });
+    expect(review.task.status).toBe("product_review_required");
+    expect(review.task.selectedCandidateId).toBeNull();
+    expect(review.proposal.source).toBe("recommended");
+    const confirmed = await browserAgent.confirmCandidate(task.id, buyer.id, installationId, review.proposal.id);
+    expect(confirmed.status).toBe("selection_confirmed");
+    expect(confirmed.selectedCandidateId).toBe(candidates[0]!.id);
+    await browserAgent.reportStatus(task.id, buyer.id, installationId, "navigating", "Opening protected checkout");
     await browserAgent.setPaymentPreference(task.id, buyer.id, installationId, "online");
     const observation = {
       site: "amazon_in" as const,
@@ -182,6 +201,13 @@ describe("PostgreSQL tenant and payment invariants", () => {
       adapterId: "amazon_in" as const,
       adapterVersion: "1.0.0",
       evidenceAssurance: "browser_observed" as const,
+      accountFingerprint: null,
+      maskedAccountLabel: null,
+      recurring: false,
+      finalActionLabel: "Place your order",
+      providerCurrency: null,
+      providerAmountMinor: null,
+      fxQuote: null,
     };
     expect((await browserAgent.observeCheckout(task.id, buyer.id, installationId, observation)).allowed).toBe(true);
     await browserAgent.approve(task.id, buyer.id);
@@ -196,6 +222,35 @@ describe("PostgreSQL tenant and payment invariants", () => {
     const audit = await browserAgent.audit(task.id, buyer.id);
     expect(audit.verification).toMatchObject({ valid: true, brokenAt: null });
     expect(audit.events.map((event) => event.eventType)).toEqual(expect.arrayContaining(["PURCHASE_PREPARED", "REPLAY_BLOCKED"]));
+  });
+
+  it("invalidates an approved Purchase Seal when the buyer opens another product", async () => {
+    const setup = await approvedBrowserTask("manual-replacement-buyer");
+    const replacement = await browserAgent.proposeCandidate(setup.task.id, setup.buyer.id, setup.installationId, {
+      source: "manual",
+      candidate: { canonicalProductId: "B087654321", listingId: "B087654321", title: "Ergonomic wireless mouse", seller: "Seller two", variant: "Graphite", condition: "new", availability: "available", pricePaise: 85_000, currency: "INR", productUrl: "https://www.amazon.in/dp/B087654321", snapshotHash: "mouse-two", observedAt: new Date().toISOString(), adapterId: "amazon_in", adapterVersion: "2.0.0", imageUrl: null, rating: 4.6, reviewCount: 2400, deliveryEstimate: "Tomorrow", rankingReasons: ["You opened this product yourself"], proposalSource: "manual", queryMismatch: false },
+    });
+    expect(replacement.task).toMatchObject({ status: "product_review_required", selectedCandidateId: null, purchasePermitId: null, confirmedAt: null });
+    expect(replacement.proposal.source).toBe("manual");
+    expect((await pool.query("SELECT status FROM browser_purchase_permits WHERE id=$1", [setup.permitId])).rows[0].status).toBe("denied");
+    expect((await pool.query("SELECT count(*)::int AS count FROM shopping_candidates WHERE task_id=$1 AND selected", [setup.task.id])).rows[0].count).toBe(0);
+    const audit = await browserAgent.audit(setup.task.id, setup.buyer.id);
+    expect(audit.verification.valid).toBe(true);
+    expect(audit.events.map((event) => event.eventType)).toContain("PRODUCT_SELECTION_INVALIDATED");
+  });
+
+  it("binds visible operator commands and redacted evidence to one granted domain", async () => {
+    const buyer = await user("operator-buyer"); const installationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    await browserAgent.registerInstallation({ userId: buyer.id, clientId: "spendseal-browser-extension", scopes: ["browser:tasks:read"] }, { installationId, name: "Operator Chromium" });
+    const task = await browserAgent.createWebTask(buyer.id, CreateWebPurchaseTaskInputSchema.parse({ siteUrl: "https://example.com/shop", objective: "Buy a one-time software license", maxTotalPaise: 50_000, purchaseKind: "api_credits", requireRefundable: false, minimumReturnWindowDays: null, latestDeliveryDate: null, expiresInMinutes: 15 }));
+    expect(task).toMatchObject({ site: "generic_web", purchaseKind: "generic_one_time", mode: "prepare_only" });
+    await browserAgent.recordSiteGrant(task.id, buyer.id, installationId, "https://example.com");
+    await expect(browserAgent.queueOperatorAction(task.id, buyer.id, { type: "navigate", url: "https://lookalike.example/shop" })).rejects.toThrow("DOMAIN_MISMATCH");
+    const queued = await browserAgent.queueOperatorAction(task.id, buyer.id, { type: "navigate", url: "https://example.com/product/one" });
+    const command = await browserAgent.claimOperatorCommand(task.id, buyer.id, installationId); expect(command).toMatchObject({ id: queued.commandId, action: { type: "navigate" } });
+    const snapshot = { url: "https://example.com/product/one", title: "One-time license", site: "generic_web" as const, capturedAt: new Date().toISOString(), text: ["One-time license", "INR 499"], controls: [{ ref: "ss-0", role: "button", label: "Review license", disabled: false }], prices: [{ label: "Visible price 1", amount: "INR 499" }], sensitiveContentRemoved: true as const, screenshotIncluded: false as const };
+    await browserAgent.completeOperatorCommand(task.id, buyer.id, installationId, queued.commandId, { status: "completed", result: { navigated: true }, snapshot });
+    expect((await browserAgent.operatorState(task.id, buyer.id)).snapshot).toMatchObject({ url: snapshot.url, screenshotIncluded: false, sensitiveContentRemoved: true });
   });
 
   it("enables live task mode only for the explicit owner allowlist", async () => {

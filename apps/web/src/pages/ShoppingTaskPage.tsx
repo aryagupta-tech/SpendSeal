@@ -93,14 +93,14 @@ export function ShoppingTaskPage() {
         <p className="eyebrow mt-6">Browser-observed purchase chamber</p>
         <h1 className="mt-3 text-4xl font-semibold tracking-tight">Review your Purchase Seal</h1>
         <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-white/45">
-          SpendSeal observed this checkout in your local browser. It is not provider-verified, and the showcase will not place a live order.
+          SpendSeal independently observed this checkout in your permitted browser tab. The exact evidence level and execution mode are shown below.
         </p>
       </div>
       <div className="trust-preview">
         <div className="flex items-center justify-between gap-4 border-b border-white/[.08] bg-gradient-to-r from-mint/[.075] to-transparent p-5">
           <div>
             <p className="font-mono text-[9px] uppercase tracking-wider text-white/35">
-              {task.site === "amazon_in" ? "Amazon India" : "Flipkart"} browser adapter
+              {task.site === "amazon_in" ? "Amazon India" : task.site === "flipkart_in" ? "Flipkart" : task.site === "openai_api" ? "OpenAI API billing" : "Agent-assisted website"} purchase adapter
             </p>
             <h2 className="mt-2 text-xl font-semibold">{observed?.title ?? task.query ?? "Exact product"}</h2>
           </div>
@@ -121,11 +121,19 @@ export function ShoppingTaskPage() {
           <Constraint label="Maximum allowed" value={money(task.maxTotalPaise)} />
           <Constraint label="Delivery address" value={observed?.maskedAddressLabel ?? "Address remains local/masked"} />
           <Constraint label="Delivery date" value={observed?.deliveryDate ?? "Not observed"} />
+          {task.purchaseKind !== "physical_good" && <Constraint label="Destination account" value={observed?.maskedAccountLabel ?? "Account remains local/masked"} />}
+          <Constraint label="Billing" value={observed?.recurring ? "Recurring — blocked" : "One-time only"} />
           <Constraint label="Payment choice" value={task.paymentPreference === "cash_on_delivery" ? "Cash on Delivery" : task.paymentPreference === "online" ? "Online payment" : "Not selected"} />
           <Constraint label="Payment method" value={observed?.paymentMethodType?.replaceAll("_", " ") ?? "Not stored"} />
+          {observed?.providerCurrency && <Constraint label="Provider amount" value={`${observed.providerCurrency} ${((observed.providerAmountMinor ?? 0) / 100).toFixed(2)}`} />}
+          {observed?.fxQuote && <Constraint label="Currency estimate" value={`₹${observed.fxQuote.rate.toFixed(2)}/USD + ${observed.fxQuote.bufferPercent}% safety buffer`} />}
+          {task.site === "openai_api" && <div className="my-4 rounded-xl border border-amber-300/20 bg-amber-300/[.06] p-4 text-xs leading-5 text-amber-100/70">
+            OpenAI API prepaid credits are non-refundable and expire after one year. This is a one-time credit purchase; automatic recharge is disabled. The INR figure is a buffered estimate, and your bank's final conversion cannot be cryptographically guaranteed.
+          </div>}
+          <Constraint label="Final action" value={observed?.finalActionLabel ?? "Not observed"} />
           <Constraint label="Observation expires" value={dateTime(permit?.expiresAt ?? task.expiresAt)} />
           <Constraint label="Evidence" value={<span className="max-w-64 text-right text-xs">
-            browser_observed · {observed?.adapterId ?? task.site} v{observed?.adapterVersion ?? "1"}<br />
+            {observed?.evidenceAssurance ?? "browser_observed"} · {observed?.adapterId ?? task.site} v{observed?.adapterVersion ?? "1"}<br />
             <span className="font-mono text-[9px] text-white/35">
               {task.checkoutSnapshotHash ? shortId(task.checkoutSnapshotHash) : "pending"}
             </span>

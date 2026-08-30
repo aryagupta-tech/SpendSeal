@@ -114,10 +114,12 @@ export const shoppingTasks = pgTable("shopping_tasks", {
   quantity: integer("quantity").notNull().default(1), currency: text("currency").notNull().default("INR"), status: text("status").notNull(), selectedCandidateId: uuid("selected_candidate_id"), purchasePermitId: uuid("purchase_permit_id"),
   checkoutSnapshotHash: text("checkout_snapshot_hash"), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), denialReason: text("denial_reason"), mode: text("mode").notNull().default("prepare_only"), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), createdAt: createdAt(), updatedAt: updatedAt(),
   paymentPreference: text("payment_preference"),
+  allowedOrigin: text("allowed_origin"), purchaseKind: text("purchase_kind").notNull().default("physical_good"), proposedCandidateId: uuid("proposed_candidate_id"),
+  selectionConfirmedAt: timestamp("selection_confirmed_at", { withTimezone: true, mode: "string" }),
 }, (table) => [index("shopping_tasks_buyer_status_idx").on(table.buyerId, table.status, table.createdAt)]);
 
 export const shoppingCandidates = pgTable("shopping_candidates", {
-  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), canonicalProductId: text("canonical_product_id").notNull(), listingId: text("listing_id"), title: text("title").notNull(), seller: text("seller"), variant: text("variant"), condition: text("condition").notNull(), availability: text("availability").notNull(), pricePaise: integer("price_paise").notNull(), currency: text("currency").notNull(), productUrl: text("product_url").notNull(), snapshotHash: text("snapshot_hash").notNull(), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), adapterId: text("adapter_id").notNull(), adapterVersion: text("adapter_version").notNull(), selected: boolean("selected").notNull().default(false), createdAt: createdAt(),
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), canonicalProductId: text("canonical_product_id").notNull(), listingId: text("listing_id"), title: text("title").notNull(), seller: text("seller"), variant: text("variant"), condition: text("condition").notNull(), availability: text("availability").notNull(), pricePaise: integer("price_paise").notNull(), currency: text("currency").notNull(), productUrl: text("product_url").notNull(), snapshotHash: text("snapshot_hash").notNull(), observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(), adapterId: text("adapter_id").notNull(), adapterVersion: text("adapter_version").notNull(), selected: boolean("selected").notNull().default(false), imageUrl: text("image_url"), rating: text("rating"), reviewCount: integer("review_count"), deliveryEstimate: text("delivery_estimate"), rankingReasons: jsonb("ranking_reasons_json").notNull().default([]), proposalSource: text("proposal_source").notNull().default("recommended"), queryMismatch: boolean("query_mismatch").notNull().default(false), createdAt: createdAt(),
 }, (table) => [uniqueIndex("shopping_candidates_task_product_idx").on(table.taskId, table.canonicalProductId, table.productUrl)]);
 
 export const browserPurchasePermits = pgTable("browser_purchase_permits", {
@@ -145,6 +147,23 @@ export const browserApprovalContinuations = pgTable("browser_approval_continuati
 export const shoppingAuditChainHeads = pgTable("shopping_audit_chain_heads", {
   taskId: uuid("task_id").primaryKey().references(() => shoppingTasks.id), sequence: integer("sequence").notNull().default(0), hash: text("hash").notNull().default("GENESIS"),
 });
+
+export const shoppingSelectionProposals = pgTable("shopping_selection_proposals", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), candidateId: uuid("candidate_id").notNull().references(() => shoppingCandidates.id), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id),
+  source: text("source").notNull(), status: text("status").notNull(), queryMismatch: boolean("query_mismatch").notNull().default(false), warning: text("warning"), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
+}, (table) => [index("shopping_selection_proposals_task_idx").on(table.taskId, table.createdAt)]);
+
+export const browserSiteGrants = pgTable("browser_site_grants", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), installationId: uuid("installation_id").notNull().references(() => browserInstallations.id), origin: text("origin").notNull(), grantedAt: timestamp("granted_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(), revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
+}, (table) => [uniqueIndex("browser_site_grants_unique").on(table.taskId, table.installationId, table.origin)]);
+
+export const browserOperatorCommands = pgTable("browser_operator_commands", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), installationId: uuid("installation_id").references(() => browserInstallations.id), sequence: integer("sequence").notNull(), action: jsonb("action_json").notNull(), status: text("status").notNull().default("queued"), result: jsonb("result_json"), createdAt: createdAt(), claimedAt: timestamp("claimed_at", { withTimezone: true, mode: "string" }), completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+}, (table) => [uniqueIndex("browser_operator_commands_task_sequence_unique").on(table.taskId, table.sequence), index("browser_operator_commands_pending_idx").on(table.taskId, table.status, table.sequence)]);
+
+export const browserFxQuotes = pgTable("browser_fx_quotes", {
+  id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), baseCurrency: text("base_currency").notNull(), quoteCurrency: text("quote_currency").notNull(), rate: text("rate").notNull(), bufferPercent: integer("buffer_percent").notNull(), source: text("source").notNull(), quotedAt: timestamp("quoted_at", { withTimezone: true, mode: "string" }).notNull(), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), createdAt: createdAt(),
+}, (table) => [index("browser_fx_quotes_task_idx").on(table.taskId, table.quotedAt)]);
 export const shoppingAuditEvents = pgTable("shopping_audit_events", {
   id: uuid("id").primaryKey(), taskId: uuid("task_id").notNull().references(() => shoppingTasks.id), buyerId: uuid("buyer_id").notNull().references(() => users.id), sequence: integer("sequence").notNull(), eventType: text("event_type").notNull(), actor: text("actor").notNull(), reasonCode: text("reason_code"), adapterId: text("adapter_id"), adapterVersion: text("adapter_version"), evidenceAssurance: text("evidence_assurance").notNull().default("browser_observed"), payload: jsonb("payload_json").notNull(), previousHash: text("previous_hash").notNull(), hash: text("hash").notNull(), createdAt: createdAt(),
 }, (table) => [uniqueIndex("shopping_audit_task_sequence_unique").on(table.taskId, table.sequence), uniqueIndex("shopping_audit_task_hash_unique").on(table.taskId, table.hash)]);

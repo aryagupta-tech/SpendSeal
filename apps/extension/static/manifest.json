@@ -2,12 +2,12 @@
   "manifest_version": 3,
   "name": "SpendSeal — Safe Purchase Preparation",
   "short_name": "SpendSeal",
-  "version": "0.3.0",
-  "description": "Automatically configure and protect Amazon India and Flipkart checkout under exact buyer-approved constraints.",
-  "permissions": ["activeTab", "scripting", "storage", "identity", "sidePanel"],
-  "host_permissions": ["https://spendseal.vercel.app/*", "https://amazon.in/*", "https://www.amazon.in/*", "https://flipkart.com/*", "https://www.flipkart.com/*"],
+  "version": "0.4.0",
+  "description": "Authorize ChatGPT to navigate one website while SpendSeal protects product selection and final purchase execution.",
+  "permissions": ["activeTab", "scripting", "storage", "identity", "sidePanel", "alarms"],
+  "host_permissions": ["https://spendseal.vercel.app/*"],
+  "optional_host_permissions": ["https://*/*"],
   "background": { "service_worker": "service-worker.js" },
   "side_panel": { "default_path": "sidepanel.html" },
-  "action": { "default_title": "Open SpendSeal" },
-  "content_scripts": [{ "matches": ["https://amazon.in/*", "https://www.amazon.in/*", "https://flipkart.com/*", "https://www.flipkart.com/*"], "js": ["content.js"], "run_at": "document_idle", "all_frames": false }]
+  "action": { "default_title": "Open SpendSeal" }
 }

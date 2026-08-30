@@ -1,10 +1,12 @@
 # SpendSeal
 
-> Merchants publish authoritative products. Buyers choose products and limits. ChatGPT interprets intent. Passkeys authorize. SpendSeal enforces. Razorpay executes.
+> ChatGPT operates the web. Buyers choose the item and limits. Passkeys authorize. SpendSeal independently re-checks and releases one protected purchase.
 
 SpendSeal is a multi-merchant authorization firewall for AI-initiated payments, built for Razorpay AI Buildathon Track 01. It starts with an empty catalog. NovaDesk is optional demo data, not the product model.
 
-SpendSeal also includes an automatic protected-checkout agent for Amazon India and Flipkart. ChatGPT creates a constrained Shopping Task, the buyer chooses one exact listing, and the local extension visibly configures Buy Now, the saved default address, delivery, and COD or online payment using the buyer's existing signed-in browser. A passkey approves the exact final checkout. SpendSeal then re-checks every protected detail and records `PURCHASE_PREPARED` by default; controlled live ordering remains owner-gated.
+SpendSeal is the purchase control plane above an AI browser operator. ChatGPT may search, compare, scroll, and navigate through a local extension, but it cannot accept a product proposal, approve a Purchase Seal, or trigger the protected final submit. The buyer reviews the exact product first, then approves the fully observed checkout with a passkey. SpendSeal independently re-reads every protected value and releases at most one final execution.
+
+Amazon India and Flipkart use audited browser adapters. OpenAI API prepaid credits and other HTTPS sites use runtime, one-domain permissions and remain prepare-only by default. Subscriptions and automatic recharge are blocked. Passwords, card numbers, CVV, UPI PINs, OTPs, CAPTCHA answers, cookies, and full addresses are never sent to ChatGPT.
 
 No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and calls ordinary MCP tools. No MCP tool can approve a mandate or complete payment.
 
@@ -19,7 +21,9 @@ No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 
 - Buyer-bound PurchasePermits with passkey approval, deterministic policy checks, one unique payment claim, replay prevention, and reconciliation-required failure handling.
 - Merchant-specific raw-body Razorpay webhooks, HMAC verification, and per-merchant event deduplication.
 - OAuth 2.1 authorization code + S256 PKCE for ChatGPT MCP, 15-minute access tokens, rotating 30-day refresh tokens, and reuse-family revocation.
-- A Manifest V3 Chromium extension for Amazon India and Flipkart with exact host permissions, extension OAuth + PKCE, visible navigation, three-candidate selection, checkout observation, and fail-closed adapters.
+- A Manifest V3 Chromium extension with runtime per-domain permissions, extension OAuth + PKCE, visible operator commands, redacted page structure, recommendation explanations, manual product-page detection, and fail-closed adapters.
+- A 15-minute product-review checkpoint: clicking a recommended match or manually opening another product only creates a proposal. Checkout starts only after the buyer presses **Use this product**.
+- OpenAI API prepaid-credit preparation with one-time billing enforcement, a timestamped USD/INR reference quote, a 10% conversion/issuer-fee buffer, masked organization binding, and no claim that a bank's final conversion is guaranteed.
 - Buyer-bound Shopping Tasks and Purchase Seals covering product, variant, seller, quantity, complete payable total, delivery, return constraints, address fingerprint, adapter version, single-use execution, and a separate SHA-256 audit chain.
 - Prepare-only execution by default (`BROWSER_LIVE_PURCHASE_ENABLED=false`). Login, CAPTCHA, OTP, 3-D Secure, ambiguous pages, unrelated cart items, and external payment challenges always return control to the buyer.
 - Separate SHA-256 hash-linked chains for each PurchasePermit and merchant administration stream. PostgreSQL triggers reject updates/deletes.
@@ -33,9 +37,9 @@ The browser-agent build has been verified with:
 
 - A clean TypeScript project-reference type check.
 - Successful Vercel and Docker production builds.
-- All 33 unit and PostgreSQL integration tests passing across six test files, including policy, cryptography, Shopify, OAuth rotation, tenant isolation, payment concurrency, browser execution concurrency, replay denial, adapter fixtures, and both audit chains.
+- All 41 unit and PostgreSQL integration tests passing across six test files, including policy, cryptography, Shopify, OAuth rotation, tenant isolation, product-review invalidation, runtime domain binding, redacted operator evidence, payment concurrency, replay denial, adapter fixtures, and both audit chains.
 - A healthy OrbStack Compose stack with PostgreSQL migrations ready at `/api/v1/health`.
-- Extension package inspection confirming the six required Manifest V3 files are present in the downloadable ZIP and only the declared Amazon India, Flipkart, and SpendSeal origins are granted host access.
+- Extension package inspection confirming the six required Manifest V3 files are present in the downloadable ZIP; SpendSeal itself is the only permanent host and each shopping site is requested at runtime for one task.
 - A production-container dependency audit reporting no known runtime vulnerabilities.
 
 The PostgreSQL integration suite requires a running PostgreSQL instance. Real Amazon India and Flipkart sessions remain a controlled manual test because SpendSeal never bypasses site login or anti-bot challenges.
@@ -69,6 +73,8 @@ Use the permanent **Production** domain for every security setting. Do not use a
    BROWSER_AGENT_ENABLED=true
    BROWSER_LIVE_PURCHASE_ENABLED=false
    BROWSER_LIVE_BUYER_IDS=
+   OPENAI_CREDITS_LIVE_ENABLED=false
+   GENERIC_WEB_LIVE_ENABLED=false
    DEMO_MODE=false
    ```
 
@@ -227,22 +233,28 @@ Implemented MCP tools:
 | `create_shopping_task` | `shopping:create` | Creates one Amazon India or Flipkart task; cannot select, approve, or order |
 | `get_shopping_task` | `shopping:read` | Returns only the OAuth buyer's task, candidates, and Purchase Seal state |
 | `get_shopping_task_audit` | `shopping:audit` | Verifies the separate browser-task SHA-256 evidence chain |
+| `create_web_purchase_task` | `shopping:create` | Creates an exact-domain Amazon, Flipkart, OpenAI API credit, or generic one-time purchase task |
+| `get_web_purchase_task` | `shopping:read` | Reads the buyer's web task and pending product-review proposal |
+| `get_web_purchase_task_audit` | `shopping:audit` | Verifies the web-task audit chain |
+| `get_browser_operator_state` | `shopping:read` | Returns only redacted page structure and operator results |
+| `perform_browser_operator_action` | `shopping:create` | Queues visible navigation, scroll, click, select, or non-sensitive typing; cannot approve or submit |
 
 ## Install the local browser extension
 
-The extension supports Chrome, Edge, Arc, Brave, and other Chromium browsers. It does not request cookies, browsing history, passwords, or card data. It uses the browser's existing signed-in session without copying credentials to SpendSeal.
+The extension supports Chrome, Edge, Arc, Brave, and other Chromium browsers. It requests access only to the active task's exact HTTPS domain at runtime. It does not request cookie, browsing-history, password, or card-data access and uses the browser's existing signed-in session without copying credentials to SpendSeal.
 
 1. Build everything with `npm run build`, or only the extension with `npm run build:extension`.
 2. Open your browser's extension page, enable **Developer mode**, choose **Load unpacked**, and select `apps/extension/dist`.
 3. Pin SpendSeal and open its side panel. Click **Connect SpendSeal**. OAuth opens `spendseal.vercel.app`; sign in with the same buyer account and authorize the three browser scopes.
-4. In ChatGPT, ask SpendSeal to create a Shopping Task for `amazon_in` or `flipkart_in`, using either a search query or one exact product URL and a maximum total in paise.
-5. Open the task in the extension. SpendSeal opens the visible website, observes up to three results, and requires you to choose one exact listing.
-6. After selection, SpendSeal automatically activates Buy Now, uses the website's saved default address and delivery option, and asks only **Cash on Delivery** or **Online payment**.
-7. For COD, SpendSeal selects it. For online payment, choose UPI, card, or netbanking directly on the website; SpendSeal never reads the underlying account or card details.
-8. SpendSeal shows one protected confirmation with the masked address, delivery date, seller, variant, quantity, payment type, charges, and final total. Approve it once with your passkey.
-9. SpendSeal automatically re-checks the visible checkout. The default expected result is `PURCHASE_PREPARED`; no live order is submitted. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with you.
+4. In ChatGPT, ask SpendSeal to create a Shopping Task or Web Purchase Task with one website and a maximum complete payable total.
+5. Open the task in the extension. SpendSeal shows up to three **Recommended matches** with rating/review/seller/delivery/price reasons. Clicking one opens a review card; it does not start checkout.
+6. You may instead browse the approved website yourself. Opening another product page immediately replaces the proposal and invalidates every older observation, approval, and grant. Press **Use this product** to start checkout or **Keep browsing** to do nothing.
+7. After confirmation, SpendSeal automatically activates Buy Now, uses the website's saved default address and delivery option, and asks only **Cash on Delivery** or **Online payment**.
+8. For COD, SpendSeal selects it. For online payment, choose UPI, card, or netbanking directly on the website; SpendSeal never reads the underlying account or card details.
+9. SpendSeal shows one protected confirmation with the masked destination, delivery/account, seller/variant, quantity, payment type, charges, recurrence status, assurance level, and final total. Approve it once with your passkey.
+10. SpendSeal automatically re-checks the visible checkout. The default expected result is `PURCHASE_PREPARED`; no live order is submitted. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with you.
 
-The build also produces `/downloads/spendseal-extension.zip`. Amazon and Flipkart are browser adapters, not official integrations. Their evidence is labeled `browser_observed` and never described as provider-verified. Live mode requires both `BROWSER_LIVE_PURCHASE_ENABLED=true` and the exact buyer UUID in `BROWSER_LIVE_BUYER_IDS`; all other buyers stay prepare-only.
+The build also produces `/downloads/spendseal-extension.zip`. Amazon, Flipkart, and OpenAI are browser adapters, not official integrations. Their evidence is `browser_observed`; generic sites are `agent_assisted`; neither is provider-verified. Retail live mode requires both `BROWSER_LIVE_PURCHASE_ENABLED=true` and the exact buyer UUID in `BROWSER_LIVE_BUYER_IDS`. OpenAI and generic live execution additionally require their separate flags and stay off by default.
 
 OAuth metadata is published at `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, and `/.well-known/openid-configuration`. Authorization codes are single-use and expire after five minutes. Access tokens are opaque and live for fifteen minutes. Refresh tokens rotate and reuse revokes the whole family.
 
@@ -272,8 +284,9 @@ flowchart LR
   Browser[Buyer browser] -->|Passkey + CSRF session| API[SpendSeal REST API]
   MCP --> Task[Constrained Shopping Task]
   Task --> Extension[Local Chromium extension]
-  Extension -->|visible signed-in session| Retailers[Amazon India / Flipkart]
-  Retailers -->|browser-observed checkout| Seal[Exact Purchase Seal]
+  MCP -->|redacted operator commands| Extension
+  Extension -->|visible signed-in session| Sites[Amazon / Flipkart / OpenAI / exact HTTPS site]
+  Sites -->|browser-observed or agent-assisted checkout| Seal[Exact Purchase Seal]
   Seal -->|passkey approval + re-check| Prepared[PURCHASE_PREPARED]
   Merchant[Merchant member] -->|Catalog + Test credentials| API
   Shopify[Shopify Admin GraphQL] -->|read-only catalog sync| API
@@ -304,14 +317,16 @@ evals                 ChatGPT MCP prompt evaluation material
 
 Included: Razorpay Test Mode, local zero-cost deployment, merchant-managed catalogs, multi-user/multi-merchant tenancy, product revisions, OAuth-bound MCP, passkeys, deterministic authorization, replay prevention, webhook verification, and tamper-evident audit evidence.
 
-Out of scope: live money, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, fulfilment, password recovery/email delivery, Shopify write access or automatic catalog webhooks, arbitrary-site payment submission, card/CVV/OTP storage or entry, and externally anchored audit storage.
+Out of scope: KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, automatic recharge, password recovery/email delivery, Shopify write access or automatic catalog webhooks, card/CVV/UPI-PIN/OTP storage or entry, anti-bot bypass, and externally anchored audit storage.
 
 ### About “buy from any website”
 
-SpendSeal does not currently claim it can autonomously buy from every website. A generic page scrape is not merchant-authoritative, and arbitrary checkout automation is brittle around logins, CAPTCHA, delivery details, 3-D Secure, and OTPs. The safe product direction is two explicit trust levels:
+SpendSeal can now create an exact-domain generic task and let ChatGPT operate against a redacted page structure. Generic execution deliberately fails closed unless the item/service, destination account, one-time status, currency, every charge, complete total, and exact final control are all independently readable. The assurance labels are explicit:
 
-- **Verified merchant execution:** connected Shopify or merchant APIs provide authoritative product evidence; SpendSeal can enforce the mandate and create a Razorpay Test Mode order.
-- **Universal browser assist (planned):** SpendSeal may observe a public product page, hash the observed offer, collect passkey approval, re-check the page immediately before handoff, and block changed terms. The buyer must complete login, address, card, CVV, OTP, CAPTCHA, and the final payment action on the merchant site. Observed web data must never be described as independently verified merchant truth.
+- `provider_verified`: merchant/payment-provider integration evidence.
+- `browser_observed`: audited Amazon, Flipkart, or OpenAI browser adapter.
+- `agent_assisted`: generic website with lower-assurance independently checked visible evidence.
+- `prepared_only`: no real order was submitted.
 
 ## License
 

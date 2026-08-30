@@ -20,6 +20,8 @@ export type Config = {
   browserAgentEnabled: boolean;
   browserLivePurchaseEnabled: boolean;
   browserLiveBuyerIds: string[];
+  openAiCreditsLiveEnabled: boolean;
+  genericWebLiveEnabled: boolean;
 };
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
@@ -47,6 +49,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     browserAgentEnabled: process.env.BROWSER_AGENT_ENABLED !== "false",
     browserLivePurchaseEnabled: process.env.BROWSER_LIVE_PURCHASE_ENABLED === "true",
     browserLiveBuyerIds: (process.env.BROWSER_LIVE_BUYER_IDS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    openAiCreditsLiveEnabled: process.env.OPENAI_CREDITS_LIVE_ENABLED === "true",
+    genericWebLiveEnabled: process.env.GENERIC_WEB_LIVE_ENABLED === "true",
     ...overrides,
   };
 }
