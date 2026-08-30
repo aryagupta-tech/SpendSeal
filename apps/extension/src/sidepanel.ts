@@ -67,12 +67,15 @@ function render(task: any, candidates: any[]) {
   if (task.status === "navigating" && task.selectedCandidateId) {
     addAction("Open isolated Buy Now flow", () => act(
       { type: "buyNow" },
-      (result) => show(result.clicked ? "Buy Now opened. Finish any login or security check, then inspect checkout." : result.reason),
+      (result) => result.clicked
+        ? show("Buy Now opened. Wait for the checkout page to finish loading. Complete any login or security check, then click Inspect visible final checkout.")
+        : show(result.detail ?? result.reason ?? "SpendSeal could not open Buy Now on this page.", true),
     ));
     addAction("Inspect visible final checkout", async () => {
       const result = await send({ type: "inspect", taskId: task.id });
       if (result.error) return show(result.error, true);
       if (result.userActionRequired) return show(result.reason, true);
+      if (result.candidates) return show("This is still a product or search page. First open the exact listing and click Open isolated Buy Now flow. Inspect checkout only after the final checkout page appears.", true);
       if (result.task) { render(result.task, []); show("Exact checkout observed. Approve it with your passkey in SpendSeal."); }
     });
   }

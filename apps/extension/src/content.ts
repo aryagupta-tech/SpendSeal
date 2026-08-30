@@ -49,7 +49,25 @@ declare const chrome: any;
     const observation: any = { site, sourceUrl: url, canonicalProductId, listingId: canonicalProductId, title, seller: seller(root, site), variant: variant(root), condition: productCondition(root), quantity, currency: "INR", itemSubtotalPaise: amounts.itemSubtotalPaise || finalTotalPaise, shippingPaise: amounts.shippingPaise, taxPaise: amounts.taxPaise, discountPaise: amounts.discountPaise, finalTotalPaise, extraCartItemCount, refundable: returnable(root.innerText), returnWindowDays: returnDays(root.innerText), deliveryDate: deliveryDate(root.innerText), maskedAddressLabel: pin ? `Delivery PIN ••••${pin.slice(-2)}` : null, addressFingerprint: addressText ? await digest({ address: addressText, site }) : pin ? await digest({ pin, site }) : null, paymentMethodType: selectedPaymentType(), observedAt: new Date().toISOString(), adapterId: site, adapterVersion: VERSION, evidenceAssurance: "browser_observed" };
     return { kind: "checkout", observation };
   }
-  function clickBuyNow(site: string) { const selectors = site === "amazon_in" ? ["#buy-now-button", "input[name='submit.buy-now']"] : ["button"]; for (const selector of selectors) for (const element of [...document.querySelectorAll(selector)] as HTMLElement[]) if (/buy now/i.test(element.innerText || (element as HTMLInputElement).value || "")) { element.click(); return { clicked: true }; } return { clicked: false, reason: "AUTOMATION_BLOCKED" }; }
+  function clickBuyNow(site: string) {
+    const selectors = site === "amazon_in"
+      ? ["#buy-now-button", "input[name='submit.buy-now']", "button[name='submit.buy-now']", "[data-action='buy-now'] button", "[data-action='buy-now'] input", "form[action*='/checkout'] input[type='submit']"]
+      : ["button", "[role='button']"];
+    const elements = [...new Set(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]))] as HTMLElement[];
+    const button = elements.find((element) => {
+      const label = (element.innerText || (element as HTMLInputElement).value || element.getAttribute("aria-label") || element.textContent || "").replace(/\s+/g, " ").trim();
+      return /\bbuy\s*now\b/i.test(label) && !(element as HTMLButtonElement).disabled && element.getAttribute("aria-disabled") !== "true";
+    });
+    if (button) { button.click(); return { clicked: true }; }
+    const exactProduct = Boolean(productId(location.href, site) || productIdFromPage(site));
+    return {
+      clicked: false,
+      reason: "AUTOMATION_BLOCKED",
+      detail: exactProduct
+        ? "SpendSeal could not find an enabled Buy Now button. Select the required size, colour, seller or delivery option on the product page, then try again."
+        : "Open the exact Amazon or Flipkart product page first, then try again.",
+    };
+  }
   function submitLive(message: any) { if (message.livePurchaseEnabled !== true || typeof message.executionGrant !== "string" || message.executionGrant.length < 20) return { submitted: false, reason: "LIVE_PURCHASE_DISABLED" }; const buttons = [...document.querySelectorAll("button, input[type='submit']")] as HTMLElement[]; const button = buttons.find((element) => /place (your )?order|confirm order|buy now/i.test(element.innerText || (element as HTMLInputElement).value || "")); if (!button) return { submitted: false, reason: "AUTOMATION_BLOCKED" }; button.click(); return { submitted: true }; }
   function executionOutcome() { const value = document.body.innerText.toLowerCase(); if (blocked()) return { status: "user_action_required", detail: actionReason() }; if (/order (?:has been )?placed|order confirmed|thank you for your order/.test(value)) return { status: "completed", detail: "Visible order confirmation detected." }; if (/payment failed|order failed|could not be completed/.test(value)) return { status: "failed", detail: "Visible failure page detected." }; return { status: "reconciliation_required", detail: "Submission outcome is not unambiguous on the visible page." }; }
   function canonical(raw: string, site: string) { const url = new URL(raw, location.href); if (siteFor(url.hostname) !== site) throw new Error("DOMAIN_MISMATCH"); url.hash = ""; ["tag", "ref", "qid", "sr", "affid"].forEach((key) => url.searchParams.delete(key)); return url.toString(); }
