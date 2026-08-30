@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionRequired, adapterForUrl, availablePaymentOptions, canonicalProductId, checkoutAmounts, checkoutStage, isProductUrlForSite, parseRupees } from "./adapters";
+import { actionRequired, adapterForUrl, availablePaymentOptions, canonicalProductId, checkoutAmounts, checkoutStage, isProductUrlForSite, normalizeCheckoutControlText, parseRupees } from "./adapters";
 
 describe("versioned browser adapters", () => {
   it("accepts only the exact supported domains", () => {
@@ -37,5 +37,10 @@ describe("versioned browser adapters", () => {
     expect(checkoutStage("Select a payment method Cash on Delivery UPI")).toBe("payment");
     expect(checkoutStage("Review your order Order total ₹950")).toBe("review");
     expect(availablePaymentOptions("Pay on Delivery, UPI, credit card or Net Banking")).toEqual({ cashOnDelivery: true, online: true });
+  });
+
+  it("normalizes Amazon final-order control identities", () => {
+    expect(normalizeCheckoutControlText("placeYourOrder1 submit.place-order")).toBe("place Your Order1 submit place order");
+    expect(/place (?:your )?order/i.test(normalizeCheckoutControlText("placeYourOrder1"))).toBe(true);
   });
 });

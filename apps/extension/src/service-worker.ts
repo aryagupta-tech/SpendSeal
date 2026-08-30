@@ -28,6 +28,10 @@ chrome.tabs.onUpdated.addListener((tabId: number, change: any, tab: any) => {
 chrome.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => {
   void currentFlow().then((flow) => flow ? detectManualProduct(flow, tabId).catch(() => undefined) : undefined);
 });
+chrome.webNavigation.onHistoryStateUpdated.addListener((details: any) => {
+  if (details.frameId !== 0) return;
+  void currentFlow().then((flow) => flow ? detectManualProduct(flow, details.tabId, details.url).catch(() => undefined) : undefined);
+});
 
 async function handle(message: any, sender: any) {
   if (message.type === "connect") return connect();
@@ -219,6 +223,7 @@ async function revalidate(taskId: string) {
   if (!submission.submitted) return reportExecution(taskId, claim.executionGrant, "failed", submission.detail ?? submission.reason);
   await chrome.storage.local.set({ executionGrant: claim.executionGrant });
   await saveFlow({ ...flow, phase: "submitting", message: claim.paymentPreference === "cash_on_delivery" ? "Placing Cash on Delivery order" : "Continuing to secure online payment" });
+  schedule(taskId, 1200);
   return { ...claim, submissionStarted: true };
 }
 

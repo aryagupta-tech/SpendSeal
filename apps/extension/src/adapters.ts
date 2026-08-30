@@ -26,6 +26,10 @@ export function isProductUrlForSite(site: AdapterSite, raw: string): boolean {
   try { return adapterForUrl(raw) === site && Boolean(canonicalProductId(site, raw)); } catch { return false; }
 }
 
+export function normalizeCheckoutControlText(value: string): string {
+  return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_.]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 export function parseRupees(value: string): number {
   const match = value.replaceAll(",", "").match(/(?:₹|Rs\.?|INR)?\s*([0-9]+(?:\.[0-9]{1,2})?)/i);
   return match?.[1] ? Math.round(Number(match[1]) * 100) : 0;

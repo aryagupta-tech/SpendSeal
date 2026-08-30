@@ -1,4 +1,4 @@
-import { availablePaymentOptions, checkoutAmounts, checkoutStage } from "./adapters";
+import { availablePaymentOptions, checkoutAmounts, checkoutStage, normalizeCheckoutControlText } from "./adapters";
 declare const chrome: any;
 (() => {
   if ((globalThis as any).__spendsealLoaded) return;
@@ -25,7 +25,6 @@ declare const chrome: any;
   };
   window.addEventListener("pageshow", signalManualProduct);
   window.addEventListener("popstate", signalManualProduct);
-  window.setInterval(signalManualProduct, 750);
   signalManualProduct();
   async function run(message: any) {
     if (window.top !== window) return { error: "Embedded checkout frames are refused." };
@@ -206,11 +205,20 @@ declare const chrome: any;
     const expected = message.paymentPreference === "cash_on_delivery"
       ? /place (?:your )?order|confirm order/i
       : /place (?:your )?order(?: and pay)?|continue to payment|pay now|buy credits|add to (?:credit )?balance|complete purchase/i;
-    const button = interactiveElements().find((element) => expected.test(accessibleText(element)) && enabled(element));
+    const button = finalSubmitControls().find((element) => expected.test(normalizedControlText(element)) && enabled(element));
     if (!button) return { submitted: false, reason: "AUTOMATION_BLOCKED", detail: "The exact final order control could not be identified safely." };
     button.click(); return { submitted: true };
   }
-  function executionOutcome() { const value = document.body.innerText.toLowerCase(); if (blocked()) return { status: "user_action_required", detail: actionReason() }; if (/order (?:has been )?placed|order confirmed|thank you for your order/.test(value)) return { status: "completed", detail: "Visible order confirmation detected." }; if (/payment failed|order failed|could not be completed/.test(value)) return { status: "failed", detail: "Visible failure page detected." }; return { status: "reconciliation_required", detail: "Submission outcome is not unambiguous on the visible page." }; }
+  async function executionOutcome() {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const value = document.body.innerText.toLowerCase();
+      if (blocked()) return { status: "user_action_required", detail: actionReason() };
+      if (/order (?:has been )?placed|order confirmed|thank you for your order/.test(value)) return { status: "completed", detail: "Visible order confirmation detected." };
+      if (/payment failed|order failed|could not be completed/.test(value)) return { status: "failed", detail: "Visible failure page detected." };
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    return { status: "reconciliation_required", detail: "Submission outcome is not unambiguous on the visible page." };
+  }
   function redactedSnapshot(site: string) {
     const controls = interactiveElements().filter(visible).slice(0, 120).map((element, index) => { const ref = `ss-${index}`; element.dataset.spendsealRef = ref; return { ref, role: element.getAttribute("role") || element.tagName.toLowerCase(), label: redact(accessibleText(element)).slice(0, 160), disabled: !enabled(element) }; }).filter((control) => control.label && !sensitiveLabel(control.label));
     const lines = document.body.innerText.split("\n").map((line) => redact(line.trim())).filter((line) => line.length > 1 && line.length < 240 && !sensitiveLabel(line)).slice(0, 120);
@@ -271,7 +279,12 @@ declare const chrome: any;
     const controls = [...document.querySelectorAll("label, [role='radio'], [class*='payment']")] as HTMLElement[];
     return controls.find((element) => pattern.test(accessibleText(element)) && enabled(element)) ?? null;
   }
-  function finalActionLabel() { const control = interactiveElements().find((element) => /place (?:your )?order|confirm purchase|buy credits|add to (?:credit )?balance|pay now|complete purchase/i.test(accessibleText(element)) && enabled(element)); return control ? accessibleText(control).slice(0, 120) : null; }
+  function finalSubmitControls() {
+    const exact = ["#placeYourOrder", "#placeYourOrder1", "input[name='placeYourOrder']", "input[name='placeYourOrder1']", "#submitOrderButtonId input", "#submitOrderButtonId button", "[data-testid*='place-order']"];
+    return [...new Set([...exact.flatMap((selector) => [...document.querySelectorAll(selector)]), ...interactiveElements()])] as HTMLElement[];
+  }
+  function normalizedControlText(element: HTMLElement) { return normalizeCheckoutControlText(accessibleText(element)); }
+  function finalActionLabel() { const control = finalSubmitControls().find((element) => /place (?:your )?order|confirm (?:purchase|order)|buy credits|add to (?:credit )?balance|pay now|complete purchase/i.test(normalizedControlText(element)) && enabled(element)); return control ? normalizedControlText(control).slice(0, 120) : null; }
   function selectedRecurringControl() { return ([...document.querySelectorAll("input[type='checkbox']:checked, input[type='radio']:checked")] as HTMLInputElement[]).find((element) => /auto[- ]?recharge|recurring|automatically/i.test(`${element.getAttribute("aria-label") ?? ""} ${element.closest("label")?.textContent ?? ""}`)) ?? null; }
   function recurringDetected() { return Boolean(selectedRecurringControl()) || /subscription|recurring charge|renews (?:monthly|yearly)|auto[- ]?recharge enabled/i.test(document.body.innerText); }
   function genericProductEvidence() {

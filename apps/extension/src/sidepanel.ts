@@ -1,6 +1,6 @@
 declare const chrome: any;
 const connection = byId("connection"); const tasks = byId("tasks"); const taskList = byId("task-list"); const active = byId("active"); const detail = byId("task-detail"); const actions = byId("actions"); const notice = byId("notice");
-const rankingByProduct = new Map<string, any>(); let activeTaskId: string | null = null; let timer: number | null = null;
+const rankingByProduct = new Map<string, any>(); let activeTaskId: string | null = null; let timer: number | null = null; let refreshInFlight = false; let lastRenderKey = "";
 byId("connect").onclick = () => act({ type: "connect" }, load);
 byId("refresh").onclick = loadTasks;
 byId("back").onclick = () => { activeTaskId = null; active.hidden = true; tasks.hidden = false; void loadTasks(); };
@@ -10,7 +10,7 @@ void load();
 async function load() {
   const state = await send({ type: "state" }); if (state.error) return show(state.error, true);
   connection.hidden = state.connected; tasks.hidden = !state.connected; if (state.connected) await loadTasks();
-  if (timer === null) timer = window.setInterval(() => { activeTaskId ? void refreshActive() : void loadTasks(); }, 2000);
+  if (timer === null) timer = window.setInterval(() => { activeTaskId ? void refreshActive() : void loadTasks(); }, 6000);
 }
 async function loadTasks() {
   const result = await send({ type: "pending" }); if (result.error) return show(result.error, true); taskList.innerHTML = "";
@@ -22,22 +22,27 @@ async function loadTasks() {
   }
 }
 async function openTask(task: any) {
-  activeTaskId = task.id; tasks.hidden = true; active.hidden = false; render(task, []);
+  activeTaskId = task.id; lastRenderKey = ""; tasks.hidden = true; active.hidden = false; render(task, []);
   if (["waiting_for_extension", "created"].includes(task.status)) await startTask(task);
   await refreshActive();
 }
 async function refreshActive() {
-  if (!activeTaskId) return; const result = await send({ type: "pending" }); if (result.error) return;
-  const task = result.tasks?.find((item: any) => item.id === activeTaskId);
-  const details = await fetchTask(activeTaskId); if (details?.task) render(details.task, details.candidates ?? [], details.proposal ?? null);
+  if (!activeTaskId || refreshInFlight) return;
+  refreshInFlight = true;
+  try { const details = await fetchTask(activeTaskId); if (details?.task) render(details.task, details.candidates ?? [], details.proposal ?? null); }
+  finally { refreshInFlight = false; }
 }
 async function fetchTask(taskId: string) { const result = await send({ type: "task", taskId }); return result.error ? null : result; }
 async function loadCandidates(taskId: string) { const result = await fetchTask(taskId); return result?.candidates ?? []; }
 
 function render(task: any, candidates: any[], proposal: any = null) {
   activeTaskId = task.id;
+  const renderKey = JSON.stringify([task.id, task.status, task.updatedAt, task.mode, task.paymentPreference, proposal?.id, proposal?.status, ...candidates.map((candidate) => [candidate.id, candidate.snapshotHash, candidate.selected])]);
+  if (renderKey === lastRenderKey) return;
+  lastRenderKey = renderKey;
   detail.innerHTML = `<article class="seal"><span class="status">${pretty(task.status)}</span><h2>${escapeHtml(task.query ?? "Exact product")}</h2><div class="meta">Protected maximum: ${rupees(task.maxTotalPaise)} · quantity 1 · no substitutions or add-ons</div><div class="progress"><i></i><span>${progressMessage(task.status)}</span></div></article>`;
   actions.innerHTML = "";
+  if (task.mode === "prepare_only") { const safety = document.createElement("article"); safety.className = "task"; safety.innerHTML = `<b>Demo safety is on</b><div class="meta">SpendSeal will verify this checkout, but it will not place a real COD or online order until live ordering is enabled for this buyer.</div>`; actions.append(safety); }
   if (["waiting_for_extension", "created"].includes(task.status)) addAction("Start protected search", () => startTask(task));
   if (task.status === "searching") addAction("Read matching products", async () => { const result = await send({ type: "inspect", taskId: task.id }); if (result.error) return show(result.error, true); if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); } });
   if (task.status === "selection_required") {
