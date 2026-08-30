@@ -12,5 +12,7 @@ apps/web/public/downloads/*.zip
 coverage/
 playwright-report/
 test-results/
+output/
+tmp/
 *.tsbuildinfo
 .DS_Store

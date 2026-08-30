@@ -10,6 +10,54 @@ Amazon India and Flipkart use audited browser adapters. OpenAI API prepaid credi
 
 No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and calls ordinary MCP tools. No MCP tool can approve a mandate or complete payment.
 
+## Judge quick read
+
+**One-line pitch:** ChatGPT can operate a purchase, but SpendSeal is the independent control plane that decides whether the exact final transaction is still allowed.
+
+SpendSeal directly addresses the Track 01 bar that every money action should be explainable, bounded, gated, auditable, and able to fail safely:
+
+- **Explainable:** the buyer sees the exact product, seller, variant, quantity, charges, delivery details, payment type, and final total before approval.
+- **Bounded:** a PurchasePermit or Purchase Seal fixes the permitted product and maximum complete payable amount.
+- **Gated:** a passkey approval is required; ChatGPT, an MCP link, and the browser extension cannot approve for the buyer.
+- **Independently checked:** SpendSeal re-reads the authoritative catalog or visible checkout after approval and before execution.
+- **Single use:** one permit can produce at most one execution claim; replay attempts are rejected.
+- **Auditable:** each decision becomes part of a SHA-256 hash-linked, append-only evidence chain.
+- **Fails safely:** price changes, seller or variant changes, unexpected cart items, stale evidence, ambiguous outcomes, login, CAPTCHA, OTP, and bank challenges stop or pause the flow.
+
+### Why this is not just ChatGPT Agent
+
+ChatGPT is the **operator**: it understands the request, searches, compares, and navigates. SpendSeal is the **authority**: it stores the buyer's limits, requests the buyer's passkey, independently rechecks the transaction, permits one final attempt, and records why it allowed or denied it.
+
+Giving ChatGPT browser access alone does not create an independent authorization boundary. The same agent that chose and navigated to a product would also be deciding whether its own result is acceptable. SpendSeal deliberately separates those roles. ChatGPT cannot confirm the selected product, approve the Purchase Seal, change the spending ceiling, or invoke the protected final-submit capability.
+
+### Demo readiness
+
+SpendSeal is ready for a **controlled Buildathon demonstration**, not an unrestricted public launch.
+
+| Area | Demo status | Honest limitation |
+|---|---|---|
+| Shopify catalog + PurchasePermit + Razorpay Test Mode | Primary demo path | Use Test Mode only; real money is never required |
+| Passkey approval, policy recheck, replay prevention, audit chain | Demo ready | Passkeys are bound to the exact production domain |
+| Price-change attack and deterministic denial | Demo ready | Requires access to the connected Shopify development store |
+| Amazon India and Flipkart browser agent | Controlled secondary demo | Site layout, login, CAPTCHA, and anti-bot changes can interrupt it |
+| Generic websites and OpenAI prepaid credits | Prepare-only preview | Live execution stays disabled until adapter and policy review is complete |
+| Public consumer release | Not ready | Needs store publication, policy/legal review, monitoring, and ongoing adapter maintenance |
+
+For judging, lead with the merchant-integrated Razorpay flow because it has the strongest `provider_verified` evidence. Use the browser agent as the second “future of agentic commerce” demonstration and label its evidence `browser_observed`, not provider-verified.
+
+## Five-minute Razorpay Buildathon demo
+
+1. **0:00-0:30 - Problem and pitch.** Say: “AI agents can click Buy, but clicking is not authorization. SpendSeal gives the buyer a precise, single-use approval and independently checks the transaction before money moves.”
+2. **0:30-1:15 - Create a bounded purchase.** In ChatGPT, list the connected merchant catalog and create a PurchasePermit for the ₹20 test product with a ₹20 maximum, quantity one, and no price changes.
+3. **1:15-2:00 - Human gate.** Open the approval link, show the exact locked terms, and approve once with the buyer's passkey.
+4. **2:00-2:45 - Razorpay Test Mode.** Prepare checkout. SpendSeal re-fetches the Shopify variant, runs policy, creates one Razorpay Test order, and verifies the Test Mode payment or webhook.
+5. **2:45-3:30 - Evidence.** Open the decision trail and show `POLICY_ALLOWED`, `PAYMENT_ORDER_CREATED`, `PAYMENT_VERIFIED`, and “SHA-256 chain verified.”
+6. **3:30-4:05 - Replay failure.** Try the same permit again. Show `REPLAY_DETECTED` and prove no second order was created.
+7. **4:05-4:45 - Price attack.** Use a separately prepared permit, change the Shopify price after approval, then prepare checkout. Show `PRICE_CHANGED` or `BUDGET_EXCEEDED` and no Razorpay order.
+8. **4:45-5:00 - Close.** Say: “ChatGPT operates; the buyer authorizes; SpendSeal verifies; Razorpay executes; the audit trail explains every decision.”
+
+Keep a mock-adapter permit ready as a zero-cost backup if Razorpay's hosted Test checkout or network is unavailable. Do not show or paste Shopify tokens, Razorpay keys, webhook secrets, full addresses, card details, OTPs, or UPI PINs during the recording.
+
 ## What is implemented
 
 - PostgreSQL 16 with explicit migrations and tenant-safe composite catalog references.
@@ -37,7 +85,7 @@ The browser-agent build has been verified with:
 
 - A clean TypeScript project-reference type check.
 - Successful Vercel and Docker production builds.
-- All 41 unit and PostgreSQL integration tests passing across six test files, including policy, cryptography, Shopify, OAuth rotation, tenant isolation, product-review invalidation, runtime domain binding, redacted operator evidence, payment concurrency, replay denial, adapter fixtures, and both audit chains.
+- All 44 unit and PostgreSQL integration tests passing across six test files, including policy, cryptography, Shopify, OAuth rotation, tenant isolation, product-review invalidation, runtime domain binding, redacted operator evidence, payment concurrency, replay denial, adapter fixtures, and both audit chains.
 - A healthy OrbStack Compose stack with PostgreSQL migrations ready at `/api/v1/health`.
 - Extension package inspection confirming the six required Manifest V3 files are present in the downloadable ZIP; SpendSeal itself is the only permanent host and each shopping site is requested at runtime for one task.
 - A production-container dependency audit reporting no known runtime vulnerabilities.
@@ -251,7 +299,7 @@ The extension supports Chrome, Edge, Arc, Brave, and other Chromium browsers. It
 7. After confirmation, SpendSeal automatically activates Buy Now, uses the website's saved default address and delivery option, and asks only **Cash on Delivery** or **Online payment**.
 8. For COD, SpendSeal selects it. For online payment, choose UPI, card, or netbanking directly on the website; SpendSeal never reads the underlying account or card details.
 9. SpendSeal shows one protected confirmation with the masked destination, delivery/account, seller/variant, quantity, payment type, charges, recurrence status, assurance level, and final total. Approve it once with your passkey.
-10. SpendSeal automatically re-checks the visible checkout. The default expected result is `PURCHASE_PREPARED`; no live order is submitted. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with you.
+10. SpendSeal automatically re-checks the visible checkout. With real browser purchases off, the expected result is `PURCHASE_PREPARED` and no live order is submitted. If the buyer explicitly enables real browser purchases, a supported retail adapter may make one final submission after passkey approval and revalidation. Login, CAPTCHA, OTP, UPI, and bank challenges always stay with the buyer.
 
 The build also produces `/downloads/spendseal-extension.zip?v=0.4.4`; the version query prevents an older ZIP from being reused by a browser or CDN cache. Amazon, Flipkart, and OpenAI are browser adapters, not official integrations. Their evidence is `browser_observed`; generic sites are `agent_assisted`; neither is provider-verified. Each authenticated buyer may turn real retail purchases on or off for their own account from the dashboard; no Buyer ID or Vercel setup is required. Real purchasing remains off for each buyer until that buyer explicitly opts in. Operators may set `BROWSER_LIVE_PURCHASE_ENABLED=false` only as an emergency deployment-wide shutdown. OpenAI and generic live execution additionally require their separate flags and stay off by default.
 
