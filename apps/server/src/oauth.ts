@@ -40,9 +40,15 @@ export class OAuthService {
     if (!input.redirect_uri || !this.allowedRedirect(input.client_id, input.redirect_uri)) throw new SpendSealError(400, "invalid_redirect_uri", "The redirect URI is not allowed.");
     if (!input.resource || input.resource !== this.config.publicBaseUrl) throw new SpendSealError(400, "invalid_target", "The OAuth resource must exactly match SpendSeal.");
     if (!input.code_challenge || input.code_challenge_method !== "S256") throw new SpendSealError(400, "invalid_request", "S256 PKCE is required.");
-    const scopes = [...new Set((input.scope ?? "").split(/\s+/).filter(Boolean))];
-    const allowedScopes = input.client_id === this.config.extensionOauthClientId ? BROWSER_SCOPES : MCP_SCOPES;
-    if (!scopes.length || scopes.some((scope) => !(allowedScopes as readonly string[]).includes(scope))) throw new SpendSealError(400, "invalid_scope", "One or more requested scopes are unsupported for this client.");
+    const requestedScopes = [...new Set((input.scope ?? "").split(/\s+/).filter(Boolean))];
+    const extensionClient = input.client_id === this.config.extensionOauthClientId;
+    const knownScopes = extensionClient ? BROWSER_SCOPES : [...MCP_SCOPES, ...BROWSER_SCOPES];
+    if (!requestedScopes.length || requestedScopes.some((scope) => !(knownScopes as readonly string[]).includes(scope))) throw new SpendSealError(400, "invalid_scope", "One or more requested scopes are unsupported for this client.");
+    // ChatGPT may retain scopes discovered before the browser permissions were
+    // separated from MCP metadata. OAuth permits issuing a narrower scope set;
+    // silently discard those stale browser scopes rather than granting them.
+    const scopes = extensionClient ? requestedScopes : requestedScopes.filter((scope) => (MCP_SCOPES as readonly string[]).includes(scope));
+    if (!scopes.length) throw new SpendSealError(400, "invalid_scope", "At least one SpendSeal MCP scope is required.");
     return { clientId: input.client_id, redirectUri: input.redirect_uri, resource: input.resource, codeChallenge: input.code_challenge, scopes, state: input.state ?? "" };
   }
 

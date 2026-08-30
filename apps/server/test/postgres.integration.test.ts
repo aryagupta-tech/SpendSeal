@@ -214,7 +214,10 @@ describe("OAuth 2.1 buyer binding", () => {
     expect(extensionRequest.scopes).toEqual(["browser:tasks:read", "browser:observations:write"]);
     const chatGptRequest = oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: oauth.authorizationServerMetadata().scopes_supported.join(" ") });
     expect(chatGptRequest.scopes).toEqual([...MCP_SCOPES]);
+    const staleChatGptRequest = oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "catalog:read browser:tasks:read browser:execute" });
+    expect(staleChatGptRequest.scopes).toEqual(["catalog:read"]);
     expect(() => oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "browser:tasks:read" })).toThrowError(/scope/i);
+    expect(() => oauth.validateAuthorizationRequest({ response_type: "code", client_id: config.extensionOauthClientId, redirect_uri: `https://${"a".repeat(32)}.chromiumapp.org/oauth2`, resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "catalog:read" })).toThrowError(/scope/i);
   });
 
   it("enforces S256 PKCE, single-use codes, rotating refresh tokens, and reuse-family revocation", async () => {
