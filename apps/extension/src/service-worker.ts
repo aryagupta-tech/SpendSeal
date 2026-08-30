@@ -21,7 +21,7 @@ async function handle(message: any, sender: any) {
   if (message.type === "state") return state();
   if (message.type === "pending") return api("/api/v1/browser/tasks/pending");
   if (message.type === "task") return api(`/api/v1/browser/tasks/${message.taskId}`);
-  if (message.type === "openTask") return openTask(message.task);
+  if (message.type === "openTask") return openTask(message.task, message.permissionOrigin);
   if (message.type === "inspect") return inspect(message.taskId);
   if (message.type === "propose") return propose(message.taskId, { candidateId: message.candidateId, source: "recommended" });
   if (message.type === "confirmProposal") return confirmProposal(message.taskId, message.proposalId, message.productUrl);
@@ -58,17 +58,24 @@ async function state() {
   return { connected: Boolean(stored.tokens), installationId: stored.installationId ?? null, activeTaskId: stored.activeTaskId ?? null, livePurchaseEnabled: stored.livePurchaseEnabled === true, flow: stored.flow ?? null };
 }
 
-async function openTask(task: any) {
+async function openTask(task: any, permissionOrigin?: string) {
   await chrome.storage.local.set({ activeTaskId: task.id });
   const target = task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query)}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query)}` : task.allowedOrigin);
   if (!target) throw new Error("This task has no permitted website.");
-  const originPattern = `${new URL(target).origin}/*`; const granted = await chrome.permissions.request({ origins: [originPattern] });
-  if (!granted) throw new Error("SpendSeal needs access to this website for this task.");
-  await api(`/api/v1/browser/tasks/${task.id}/site-grant`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), origin: new URL(target).origin }) });
+  const targetOrigin = new URL(target).origin;
+  if (permissionOrigin !== targetOrigin) throw new Error("Website permission did not match this Shopping Task.");
+  const originPattern = `${targetOrigin}/*`; const granted = await chrome.permissions.contains({ origins: [originPattern] });
+  if (!granted) throw new Error("Click Start protected search again and allow access to this website in Chrome's permission prompt.");
+  await api(`/api/v1/browser/tasks/${task.id}/site-grant`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), origin: targetOrigin }) });
   await report(task.id, "searching", task.productUrl ? "Opening the exact supplied product for your selection." : "Opening product search.");
-  const tab = await chrome.tabs.create({ url: target, active: true });
-  if (!tab.id) throw new Error("SpendSeal could not create the shopping tab.");
-  await saveFlow({ taskId: task.id, tabId: tab.id, phase: "searching", retries: 0, message: task.productUrl ? "Reading the exact supplied product" : "Finding matching products" });
+  const existing = await currentFlow(); let tabId: number | undefined;
+  if (existing && existing.taskId === task.id) {
+    const existingTabId = existing.tabId;
+    try { const tab = await chrome.tabs.get(existingTabId); if (tab?.id) { tabId = tab.id; await chrome.tabs.update(tab.id, { url: target, active: true }); } } catch { tabId = undefined; }
+  }
+  if (!tabId) tabId = (await chrome.tabs.create({ url: target, active: true })).id;
+  if (!tabId) throw new Error("SpendSeal could not create the shopping tab.");
+  await saveFlow({ taskId: task.id, tabId, phase: "searching", retries: 0, message: task.productUrl ? "Reading the exact supplied product" : "Finding matching products" });
   return { opened: target };
 }
 
@@ -224,7 +231,7 @@ async function disconnect() { const stored = await chrome.storage.local.get(["to
 async function report(taskId: string, status: string, detail?: string) { return api(`/api/v1/browser/tasks/${taskId}/status`, { method: "POST", body: JSON.stringify({ installationId: await installationId(), status, detail }) }); }
 async function api(path: string, init: RequestInit = {}) { let tokens = (await chrome.storage.local.get(["tokens"])).tokens; if (!tokens) throw new Error("Connect the extension first."); let response = await fetch(`${API}${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${tokens.access_token}`, ...(init.headers ?? {}) } }); if (response.status === 401 && tokens.refresh_token) { tokens = await refresh(tokens.refresh_token); response = await fetch(`${API}${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${tokens.access_token}`, ...(init.headers ?? {}) } }); } const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error?.message ?? data.error?.code ?? `SpendSeal returned ${response.status}`); return data; }
 async function refresh(refreshToken: string) { const response = await fetch(`${API}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: CLIENT_ID, resource: API }) }); if (!response.ok) { await chrome.storage.local.remove("tokens"); throw new Error("Reconnect the extension."); } const tokens = await response.json(); await chrome.storage.local.set({ tokens }); return tokens; }
-async function commandTab(tabId: number, action: string, extra: any = {}) { try { return await chrome.tabs.sendMessage(tabId, { action, ...extra }); } catch { await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }); return chrome.tabs.sendMessage(tabId, { action, ...extra }); } }
+async function commandTab(tabId: number, action: string, extra: any = {}) { try { return await chrome.tabs.sendMessage(tabId, { action, ...extra }); } catch { try { await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }); return chrome.tabs.sendMessage(tabId, { action, ...extra }); } catch (error) { const message = error instanceof Error ? error.message : String(error); if (/cannot access contents|must request permission|missing host permission/i.test(message)) throw new Error("Website permission is missing. Return to SpendSeal and click Start protected search to allow this exact site."); throw error; } } }
 async function ensureFlow(taskId: string): Promise<Flow> { const existing = await currentFlow(); if (existing?.taskId === taskId) return existing; const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error("No active shopping tab."); const flow = { taskId, tabId: tab.id, phase: "unknown", retries: 0, message: "Resuming protected checkout" }; await saveFlow(flow); return flow; }
 async function currentFlow(): Promise<Flow | null> { return (await chrome.storage.local.get(["flow"])).flow ?? null; }
 async function saveFlow(flow: Flow) { await chrome.storage.local.set({ flow, activeTaskId: flow.taskId }); notify(); }

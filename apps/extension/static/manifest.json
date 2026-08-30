@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SpendSeal — Safe Purchase Preparation",
   "short_name": "SpendSeal",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Authorize ChatGPT to navigate one website while SpendSeal protects product selection and final purchase execution.",
   "permissions": ["activeTab", "scripting", "storage", "identity", "sidePanel", "alarms"],
   "host_permissions": ["https://spendseal.vercel.app/*"],

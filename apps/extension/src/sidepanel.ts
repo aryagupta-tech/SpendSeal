@@ -23,7 +23,7 @@ async function loadTasks() {
 }
 async function openTask(task: any) {
   activeTaskId = task.id; tasks.hidden = true; active.hidden = false; render(task, []);
-  if (["waiting_for_extension", "created"].includes(task.status)) { const result = await send({ type: "openTask", task }); if (result.error) show(result.error, true); }
+  if (["waiting_for_extension", "created"].includes(task.status)) await startTask(task);
   await refreshActive();
 }
 async function refreshActive() {
@@ -38,7 +38,8 @@ function render(task: any, candidates: any[], proposal: any = null) {
   activeTaskId = task.id;
   detail.innerHTML = `<article class="seal"><span class="status">${pretty(task.status)}</span><h2>${escapeHtml(task.query ?? "Exact product")}</h2><div class="meta">Protected maximum: ${rupees(task.maxTotalPaise)} · quantity 1 · no substitutions or add-ons</div><div class="progress"><i></i><span>${progressMessage(task.status)}</span></div></article>`;
   actions.innerHTML = "";
-  if (["waiting_for_extension", "searching"].includes(task.status)) addAction("Find matching products", async () => { const result = await send({ type: "inspect", taskId: task.id }); if (result.error) return show(result.error, true); if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); } });
+  if (["waiting_for_extension", "created"].includes(task.status)) addAction("Start protected search", () => startTask(task));
+  if (task.status === "searching") addAction("Read matching products", async () => { const result = await send({ type: "inspect", taskId: task.id }); if (result.error) return show(result.error, true); if (result.candidates) { rankingByProduct.clear(); for (const item of result.ranking ?? []) rankingByProduct.set(item.canonicalProductId, item); task.status = "selection_required"; render(task, result.candidates); } });
   if (task.status === "selection_required") {
     const explanation = document.createElement("p"); explanation.className = "ranking-note"; explanation.textContent = "Recommended matches—not automatic choices. Review one below, or browse any other product on this website and SpendSeal will update itself."; actions.append(explanation);
     for (const [index, candidate] of candidates.entries()) {
@@ -70,6 +71,16 @@ function render(task: any, candidates: any[], proposal: any = null) {
   if (["checkout_configuring", "navigating", "approved"].includes(task.status)) addTroubleshooting(task.id);
 }
 function addTroubleshooting(taskId: string) { const box = document.createElement("details"); box.className = "troubleshooting"; box.innerHTML = `<summary>Troubleshooting</summary><p>Use this only if the website stopped changing.</p>`; const button = document.createElement("button"); button.className = "quiet"; button.textContent = "Retry current step"; button.onclick = () => void act({ type: "retry", taskId }, () => show("Retrying the current visible step.")); box.append(button); actions.append(box); }
+async function startTask(task: any) {
+  const target = task.productUrl ?? (task.site === "amazon_in" ? `https://www.amazon.in/s?k=${encodeURIComponent(task.query ?? "")}` : task.site === "flipkart_in" ? `https://www.flipkart.com/search?q=${encodeURIComponent(task.query ?? "")}` : task.allowedOrigin);
+  if (!target) return show("This task has no permitted website.", true);
+  const permissionOrigin = new URL(target).origin; const granted = await chrome.permissions.request({ origins: [`${permissionOrigin}/*`] });
+  if (!granted) return show("Chrome needs your permission for this exact website before SpendSeal can continue.", true);
+  show("Permission granted. Opening the protected shopping tab.");
+  const result = await send({ type: "openTask", task, permissionOrigin });
+  if (result.error) return show(result.error, true);
+  show("Protected shopping tab opened. SpendSeal is finding matching products.");
+}
 function progressMessage(status: string) { const messages: Record<string, string> = { waiting_for_extension: "Waiting for the extension", searching: "Reading visible product matches", selection_required: "Review a recommendation or browse another product", product_review_required: "Waiting for your product review", selection_confirmed: "Product confirmed", operator_navigating: "ChatGPT is navigating the permitted website", navigating: "Opening the exact product", checkout_configuring: "Using saved address and default delivery", payment_choice_required: "Waiting for payment choice", payment_action_required: "Waiting for your online method", pending_approval: "Waiting for final passkey confirmation", approved: "Protection check running", submitting: "Submitting exactly once", prepared: "Protected checkout prepared", completed: "Order confirmed", user_action_required: "Paused safely for you" }; return messages[status] ?? pretty(status); }
 function addAction(label: string, handler: () => unknown) { const button = document.createElement("button"); button.textContent = label; button.onclick = () => void handler(); actions.append(button); }
 async function act(message: any, done: (value: any) => unknown) { const result = await send(message); if (result.error) show(result.error, true); else await done(result); }
