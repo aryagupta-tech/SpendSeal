@@ -12,7 +12,10 @@ export class OAuthService {
   constructor(readonly store: SpendSealStore, readonly config: Config) {}
 
   protectedResourceMetadata() {
-    return { resource: this.config.publicBaseUrl, authorization_servers: [this.config.oauthIssuer], scopes_supported: [...MCP_SCOPES, ...BROWSER_SCOPES], resource_documentation: `${this.config.publicBaseUrl}/docs/oauth` };
+    // This metadata describes the public MCP resource. Browser-extension scopes
+    // are requested directly by the fixed extension client and must not be
+    // advertised to ChatGPT as MCP permissions.
+    return { resource: this.config.publicBaseUrl, authorization_servers: [this.config.oauthIssuer], scopes_supported: [...MCP_SCOPES], resource_documentation: `${this.config.publicBaseUrl}/docs/oauth` };
   }
 
   authorizationServerMetadata() {
@@ -27,7 +30,7 @@ export class OAuthService {
       code_challenge_methods_supported: ["S256"],
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
-      scopes_supported: [...MCP_SCOPES, ...BROWSER_SCOPES],
+      scopes_supported: [...MCP_SCOPES],
     };
   }
 

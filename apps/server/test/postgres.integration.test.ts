@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
+import { MCP_SCOPES } from "@spendseal/core";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
 import { OAuthService } from "../src/oauth.js";
@@ -206,8 +207,13 @@ describe("OAuth 2.1 buyer binding", () => {
   it("separates extension browser scopes from ChatGPT MCP scopes", () => {
     const config = loadConfig({ databaseUrl, publicBaseUrl: "http://agentrail.test", oauthIssuer: "http://agentrail.test", webauthnOrigin: "http://agentrail.test", webauthnRpId: "agentrail.test", credentialEncryptionKey: Buffer.alloc(32, 5) });
     const oauth = new OAuthService(store, config);
+    expect(oauth.protectedResourceMetadata().scopes_supported).toEqual([...MCP_SCOPES]);
+    expect(oauth.authorizationServerMetadata().scopes_supported).toEqual([...MCP_SCOPES]);
+    expect(oauth.authorizationServerMetadata().scopes_supported).not.toContain("browser:execute");
     const extensionRequest = oauth.validateAuthorizationRequest({ response_type: "code", client_id: config.extensionOauthClientId, redirect_uri: `https://${"a".repeat(32)}.chromiumapp.org/oauth2`, resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "browser:tasks:read browser:observations:write" });
     expect(extensionRequest.scopes).toEqual(["browser:tasks:read", "browser:observations:write"]);
+    const chatGptRequest = oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: oauth.authorizationServerMetadata().scopes_supported.join(" ") });
+    expect(chatGptRequest.scopes).toEqual([...MCP_SCOPES]);
     expect(() => oauth.validateAuthorizationRequest({ response_type: "code", client_id: "https://chatgpt.com/oauth/client.json", redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect", resource: config.publicBaseUrl, code_challenge: "challenge", code_challenge_method: "S256", scope: "browser:tasks:read" })).toThrowError(/scope/i);
   });
 
