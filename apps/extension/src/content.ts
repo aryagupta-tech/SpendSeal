@@ -74,8 +74,12 @@ declare const chrome: any;
       : ["button", "[role='button']"];
     const elements = [...new Set(selectors.flatMap((selector) => [...document.querySelectorAll(selector)]))] as HTMLElement[];
     const button = elements.find((element) => {
-      const label = (element.innerText || (element as HTMLInputElement).value || element.getAttribute("aria-label") || element.textContent || "").replace(/\s+/g, " ").trim();
-      return /\bbuy\s*now\b/i.test(label) && !(element as HTMLButtonElement).disabled && element.getAttribute("aria-disabled") !== "true";
+      const labelledBy = element.getAttribute("aria-labelledby");
+      const linkedLabel = labelledBy ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" ") : "";
+      const identity = `${element.id} ${element.getAttribute("name") ?? ""} ${element.getAttribute("data-action") ?? ""}`;
+      const label = (element.innerText || (element as HTMLInputElement).value || element.getAttribute("aria-label") || linkedLabel || element.textContent || "").replace(/\s+/g, " ").trim();
+      const isBuyNowControl = /buy[-_. ]?now/i.test(identity) || /\bbuy\s*now\b/i.test(label);
+      return isBuyNowControl && !(element as HTMLButtonElement).disabled && element.getAttribute("aria-disabled") !== "true";
     });
     if (button) { button.click(); return { clicked: true }; }
     const exactProduct = Boolean(productId(location.href, site) || productIdFromPage(site));
