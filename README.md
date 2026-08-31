@@ -310,6 +310,10 @@ Implemented MCP tools:
 | `counter_price_negotiation` | `deals:create` | Submits the next strictly higher buyer offer, up to three total offers |
 | `get_price_negotiation` | `deals:read` | Returns only that OAuth buyer's visible offers, counters and accepted terms—never the merchant floor |
 | `create_negotiated_purchase_permit` | `intents:create` | Seals one accepted unused deal into a passkey-gated single-use PurchasePermit |
+
+The stable MCP URL is `https://spendseal.vercel.app/mcp`. If ChatGPT has cached
+an older custom-app tool schema during development, reconnect the app once using
+`https://spendseal.vercel.app/mcp-v3` to force fresh discovery of the deal tools.
 | `create_purchase_permit` | `intents:create` | Creates a mandate for the OAuth buyer; buyer ID is never accepted as input |
 | `get_purchase_permit` | `intents:read` | Returns only the OAuth buyer’s mandate |
 | `prepare_checkout` | `checkout:prepare` | Runs policy and claims at most one Test Mode order |
