@@ -68,15 +68,15 @@ SpendSeal can also supervise Amazon India and Flipkart through a local Chromium 
 
 1. **0:00-0:35 — Lost conversion.** Show a Shopify product at ₹49.95. Say: “The buyer's hard maximum is ₹45, so the normal checkout cannot convert. The merchant could accept less, but cannot publish their private minimum.”
 2. **0:35-1:05 — Private merchant authority.** In **Merchant AI Sales Closer**, enable negotiation and enter ₹42. Say: “This exact floor is AES-256-GCM encrypted and versioned. ChatGPT, the buyer, analytics, logs and buyer-facing evidence never receive it.”
-3. **1:05-2:05 — Agents create the deal.** Ask ChatGPT to buy with a ₹45 hard maximum. Start at ₹40, show counters around ₹47.97 and ₹45.18, then offer ₹44.50. Say: “Buyer offers only rise, merchant counters only fall, and neither agent can cross its principal's authority.”
-4. **2:05-2:45 — Seal and approve.** Create the negotiated PurchasePermit. Show ₹49.95 public, ₹44.50 negotiated, ₹5.45 savings, ₹45 maximum, expiry and Shopify revision. Approve with a passkey. Say: “ChatGPT can negotiate but cannot approve or pay.”
-5. **2:45-3:30 — One Razorpay Test payment.** Prepare checkout and complete the rehearsed Test payment. Say: “SpendSeal re-fetches Shopify, decrypts and rechecks merchant authority, verifies the buyer ceiling and claims exactly one order at ₹44.50.”
-6. **3:30-4:00 — Measured value.** Return to the dashboard and show one constraint-recovered Test order and ₹44.50 recovered Test Mode GMV. Say: “This conversion was recovered because public price exceeded the buyer's original ceiling.”
+3. **1:05-2:05 — Agents create the deal.** Ask ChatGPT to buy with a ₹45 hard maximum. Start at ₹40, show the merchant counters around ₹47.97 and ₹45.18, then make a final ₹45 offer. Say: “Buyer offers only rise, merchant counters only fall, and neither agent can cross its principal's authority.”
+4. **2:05-2:45 — Seal and approve.** Create the negotiated PurchasePermit. Show ₹49.95 public, ₹45 negotiated, ₹4.95 savings, ₹45 maximum, expiry and Shopify revision. Approve with a passkey. Say: “ChatGPT can negotiate but cannot approve or pay.”
+5. **2:45-3:30 — One Razorpay Test payment.** Prepare checkout and complete the rehearsed Test payment. Say: “SpendSeal re-fetches Shopify, decrypts and rechecks merchant authority, verifies the buyer ceiling and claims exactly one order at ₹45.”
+6. **3:30-4:00 — Measured value.** Return to the dashboard and show one constraint-recovered Test order and ₹45 recovered Test Mode GMV. Say: “This conversion was recovered because public price exceeded the buyer's original ceiling.”
 7. **4:00-4:30 — Explainable evidence.** Open the deal and permit audit chains. Show offers, counters, acceptance, passkey, revalidation, Razorpay order, payment verification, and valid hash chains. Point out that the floor is absent.
 8. **4:30-4:50 — Graceful failure.** Replay the paid permit for `REPLAY_DETECTED`, then show a buyer maximum below merchant authority ending in `NO_DEAL`, no permit and no Razorpay order.
 9. **4:50-5:00 — Close.** Say: “SpendSeal does not merely expose a catalog to AI. It lets buyer and merchant agents create a deal neither side can violate, then turns that agreement into one verified Razorpay payment.”
 
-Keep a mock-adapter permit ready as a zero-cost backup if the hosted Test checkout or network is unavailable. Label it clearly as mock evidence. Never display Shopify tokens, Razorpay keys, webhook secrets, full addresses, card details, OTPs, or UPI PINs.
+The presenter runbook is in [`docs/demo-script.md`](docs/demo-script.md). Keep the already verified Razorpay audit open as the first fallback. A separately prepared mock-adapter permit is the emergency provider-outage fallback; label it clearly as mock evidence and do not count it as recovered Test Mode GMV. Never display Shopify tokens, Razorpay keys, webhook secrets, full addresses, card details, OTPs, or UPI PINs.
 
 ## What is implemented
 
