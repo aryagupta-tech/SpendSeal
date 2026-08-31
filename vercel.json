@@ -11,6 +11,7 @@
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/spendseal?__spendseal_path=/api/:path*" },
     { "source": "/mcp", "destination": "/api/spendseal?__spendseal_path=/mcp" },
+    { "source": "/mcp-v3", "destination": "/api/spendseal?__spendseal_path=/mcp-v3" },
     { "source": "/oauth/:path*", "destination": "/api/spendseal?__spendseal_path=/oauth/:path*" },
     { "source": "/.well-known/:path*", "destination": "/api/spendseal?__spendseal_path=/.well-known/:path*" },
     { "source": "/login", "destination": "/index.html" },
