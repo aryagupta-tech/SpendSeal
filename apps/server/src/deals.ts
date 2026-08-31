@@ -70,8 +70,11 @@ export class PriceNegotiationService {
       if (replay.rows[0]) return this.get(input.buyerId, replay.rows[0].id, client);
       const expired = await client.query("UPDATE deal_sessions SET status='expired',updated_at=now() WHERE buyer_id=$1 AND product_id=$2 AND status IN ('negotiating','accepted','permit_created') AND expires_at<=now() RETURNING id,merchant_id", [input.buyerId, input.productId]);
       for (const row of expired.rows) await this.store.appendAudit({ scopeType: "deal", scopeId: row.id, merchantId: row.merchant_id, purchasePermitId: null, eventType: "DEAL_EXPIRED", actor: "policy_engine", reasonCode: "DEAL_EXPIRED", payload: { expired: true } }, client);
-      const active = await client.query("SELECT 1 FROM deal_sessions WHERE buyer_id=$1 AND product_id=$2 AND status IN ('negotiating','accepted','permit_created')", [input.buyerId, input.productId]);
-      if (active.rowCount) throw new DealError(409, "NEGOTIATION_LIMIT_REACHED", "An active deal already exists for this buyer and product.");
+      const active = await client.query("SELECT id FROM deal_sessions WHERE buyer_id=$1 AND product_id=$2 AND status IN ('negotiating','accepted','permit_created') ORDER BY created_at DESC LIMIT 1", [input.buyerId, input.productId]);
+      // Resume the buyer's single active deal when a fresh ChatGPT context has
+      // lost its id. This never changes the original ceiling, offers, policy or
+      // expiry and never creates a duplicate negotiation.
+      if (active.rows[0]) return this.get(input.buyerId, active.rows[0].id, client);
       const count = await client.query("SELECT COUNT(*)::int AS count FROM deal_sessions WHERE buyer_id=$1 AND product_id=$2 AND created_at>now()-interval '24 hours'", [input.buyerId, input.productId]);
       if (Number(count.rows[0].count) >= 3) throw new DealError(429, "NEGOTIATION_LIMIT_REACHED", "This buyer has reached the three-session limit for this product in 24 hours.");
       const productResult = await client.query(`SELECT p.*,pr.snapshot_hash FROM products p JOIN product_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 AND p.active=true`, [input.productId]);

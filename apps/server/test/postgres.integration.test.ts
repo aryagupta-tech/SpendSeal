@@ -65,6 +65,8 @@ describe("PostgreSQL tenant and payment invariants", () => {
     const first = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "same-negotiation-start" });
     const replay = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "same-negotiation-start" });
     expect(replay.id).toBe(first.id); expect(replay.rounds).toHaveLength(1);
+    const resumed = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_400, initialOfferPaise: 4_100, idempotencyKey: "fresh-chat-resume" });
+    expect(resumed.id).toBe(first.id); expect(resumed.rounds).toHaveLength(1); expect(resumed.buyerMaxTotalPaise).toBe(4_500); expect(resumed.rounds[0]?.buyerOfferPaise).toBe(4_000);
     await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 3_999 })).rejects.toMatchObject({ code: "NEGOTIATION_LIMIT_REACHED" });
     await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 4_501 })).rejects.toMatchObject({ code: "OFFER_ABOVE_BUYER_LIMIT" });
   });
