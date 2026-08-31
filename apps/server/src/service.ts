@@ -5,11 +5,14 @@ import { CredentialVault } from "./credentials.js";
 import { AmbiguousPaymentError, MockPaymentAdapter, RazorpayPaymentAdapter, type PaymentAdapter } from "./payments.js";
 import { SpendSealStore, type CatalogConnection, type PaymentConfiguration } from "./store.js";
 import { ShopifyAdminClient, ShopifyError } from "./shopify.js";
+import { PriceNegotiationService } from "./deals.js";
 
 export class SpendSealService {
   readonly vault: CredentialVault;
+  readonly deals: PriceNegotiationService;
   constructor(readonly store: SpendSealStore, readonly config: Config) {
     this.vault = new CredentialVault(config.credentialEncryptionKey, config.credentialEncryptionKeyVersion);
+    this.deals = new PriceNegotiationService(store, this.vault);
   }
 
   async createIntent(buyerId: string, raw: CreateIntentInput, actor: "chatgpt" | "buyer" = "chatgpt") {
@@ -57,7 +60,7 @@ export class SpendSealService {
       return { intent: initial, decision };
     }
     let preparation;
-    try { preparation = await this.store.prepareOrderClaim(purchasePermitId, buyerId, evaluatePurchasePermit, paymentConfig.version); }
+    try { preparation = initial.negotiatedDeal ? await this.deals.prepareOrderClaim(purchasePermitId, buyerId, paymentConfig.version) : await this.store.prepareOrderClaim(purchasePermitId, buyerId, evaluatePurchasePermit, paymentConfig.version); }
     catch (error) { if (error instanceof Error && error.message === "INTENT_NOT_FOUND") throw new SpendSealError(404, "INTENT_NOT_FOUND", "PurchasePermit not found for this buyer."); throw error; }
 
     if (preparation.kind === "denied") return { intent: preparation.intent, decision: preparation.decision };
@@ -65,13 +68,14 @@ export class SpendSealService {
       const now = new Date().toISOString();
       const decision: PolicyDecision = { allowed: false, reasons: ["REPLAY_DETECTED"], message: preparation.order.status === "ready" ? "The existing checkout is returned; no duplicate order was created." : "PurchasePermit already consumed. No duplicate order was created.", evaluatedAt: now, observedAt: preparation.order.observedAt, observedPricePaise: preparation.order.amountPaise, observedProductVersion: preparation.order.observedProductVersion, observedProductRevisionId: preparation.order.observedProductRevisionId, observedProductSnapshotHash: preparation.order.observedProductSnapshotHash, catalogAuthority: preparation.order.catalogAuthority };
       await this.store.appendAudit({ scopeType: "intent", scopeId: preparation.intent.id, merchantId: preparation.intent.merchantId, purchasePermitId: preparation.intent.id, eventType: "REPLAY_BLOCKED", actor: "policy_engine", reasonCode: "REPLAY_DETECTED", payload: { orderId: preparation.order.id, orderStatus: preparation.order.status } });
+      if (preparation.intent.negotiatedDeal) await this.store.appendAudit({ scopeType: "deal", scopeId: preparation.intent.negotiatedDeal.dealSessionId, merchantId: preparation.intent.merchantId, purchasePermitId: preparation.intent.id, eventType: "REPLAY_BLOCKED", actor: "policy_engine", reasonCode: "REPLAY_DETECTED", payload: { orderId: preparation.order.id, orderStatus: preparation.order.status, duplicateOrderCreated: false } });
       await this.store.recordAiCommerceEvent({ merchantId: preparation.intent.merchantId, productId: preparation.intent.productId, purchasePermitId: preparation.intent.id, paymentOrderId: preparation.order.id, eventType: "REPLAY_BLOCKED", source: "policy_engine", deduplicationKey: `replay:${preparation.intent.id}` });
       return { intent: preparation.intent, decision, ...(preparation.order.status === "ready" ? { checkoutUrl: `${this.config.publicBaseUrl}/checkout/${preparation.order.checkoutToken}`, orderStatus: preparation.order.status } : {}) };
     }
 
     try {
       const adapter = this.adapter(paymentConfig);
-      const providerOrder = await adapter.createOrder({ amountPaise: preparation.product.pricePaise, currency: "INR", receipt: preparation.intent.idempotencyKey, notes: { intent_lock_id: preparation.intent.id, merchant_id: preparation.intent.merchantId, buyer_id: preparation.intent.buyerId, product_id: preparation.intent.productId, observed_product_version: String(preparation.product.version), observed_revision_id: preparation.product.revisionId, observed_snapshot_hash: preparation.product.snapshotHash } });
+      const providerOrder = await adapter.createOrder({ amountPaise: preparation.order.amountPaise, currency: "INR", receipt: preparation.intent.idempotencyKey, notes: { intent_lock_id: preparation.intent.id, merchant_id: preparation.intent.merchantId, buyer_id: preparation.intent.buyerId, product_id: preparation.intent.productId, observed_product_version: String(preparation.product.version), observed_revision_id: preparation.product.revisionId, observed_snapshot_hash: preparation.product.snapshotHash, purchase_type: preparation.intent.negotiatedDeal ? "negotiated_deal" : "catalog_price" } });
       const order = await this.store.completeOrder(preparation.order.id, providerOrder.id, paymentConfig.adapter);
       return { intent: { ...preparation.intent, status: "checkout_ready" }, decision: preparation.decision, checkoutUrl: `${this.config.publicBaseUrl}/checkout/${order.checkoutToken}`, orderStatus: order.status };
     } catch (error) {

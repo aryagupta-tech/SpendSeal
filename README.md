@@ -1,57 +1,52 @@
 # SpendSeal
 
-> Make your store purchasable by AI agents.
+> Turn price-sensitive AI shoppers into paid orders.
 
-SpendSeal is an **AI Checkout Gateway for merchants**, built for Razorpay AI Buildathon Track 01. A merchant connects Shopify and Razorpay Test Mode once. SpendSeal publishes an agent-readable storefront that ChatGPT can discover, turns a buyer request into a bounded PurchasePermit, independently rechecks the final transaction, and creates at most one Razorpay Test Mode payment attempt.
+SpendSeal is a **Bounded AI Dealmaker** for Razorpay AI Buildathon Track 01. A buyer privately gives ChatGPT a hard maximum. A merchant privately gives SpendSeal one encrypted minimum price. The buyer agent and deterministic merchant agent negotiate visibly for at most three offers without directly exposing either limit. An accepted deal becomes a single-use PurchasePermit, the buyer approves it with a passkey, SpendSeal revalidates every term, and Razorpay executes the negotiated Test Mode payment exactly once.
 
-The merchant owns product truth. The buyer owns authorization. ChatGPT can discover, explain, and recommend products, but it cannot invent a price, approve a PurchasePermit, increase a spending limit, bypass a passkey, or invoke an unprotected payment. SpendSeal's authorization firewall remains the technical control layer beneath the merchant-facing product.
+The primary outcome is **constraint-recovered Test Mode GMV**: a verified negotiated payment where the public Shopify price was above the buyer's original hard ceiling, so the ordinary checkout could not have converted.
 
-No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and ordinary MCP tools. Amazon India and Flipkart browser supervision remains an additional buyer-side capability, but the primary Track 01 story is the stronger, provider-integrated Shopify → ChatGPT → Razorpay merchant flow.
+No OpenAI API key or ChatGPT credential is used. ChatGPT connects through OAuth 2.1 and MCP. Shopify remains the authoritative catalog, merchant minimums use the existing AES-256-GCM credential vault, and Amazon/Flipkart browser supervision remains a secondary capability.
 
 ## Judge quick read
 
-**One-line pitch:** SpendSeal turns an existing Shopify and Razorpay merchant into an AI-transactable merchant while keeping every money action explainable, bounded, gated, single-use, and auditable.
+**One-line pitch:** SpendSeal lets buyer and merchant agents autonomously create a price both sides permit, then seals that agreement into one passkey-approved Razorpay Test payment.
 
 ### Merchant problem
 
-Most online stores are designed for human browsing. AI agents cannot reliably obtain authoritative product data, know which checkout rules are current, or prove that a buyer approved the exact transaction. Giving an agent browser access solves clicking; it does not create an independent authorization boundary or a measurable merchant sales channel.
+Price-sensitive buyers often leave because a public price is slightly above their budget, while merchants cannot publish their true minimum without weakening the listed price for everyone. A browser agent can click checkout, but it cannot safely negotiate against two private limits or prove that neither party's authority was violated.
 
 ### AI-readable storefront
 
 SpendSeal publishes the merchant name, active Shopify products, descriptions, variants, prices, availability, merchant-stated refund terms, supported currency, checkout capability, evidence assurance, and Razorpay Test Mode availability. The focused `get_merchant_storefront` MCP tool returns this information as one structured response. Repeated catalog calls are deduplicated in analytics and never store the buyer's prompt.
 
-### ChatGPT purchase flow
+### Bounded negotiation
 
-ChatGPT discovers the merchant storefront, filters the authoritative products, and creates a PurchasePermit for one exact product revision. The permit binds the buyer, merchant, product, quantity one, maximum payable total, price-change rule, optional refund requirement, and expiry. ChatGPT cannot approve it. The signed-in buyer must review the terms and verify a passkey.
+The merchant enables negotiation per product and enters one exact private minimum. That value is encrypted, versioned, tenant-isolated, and absent from MCP, buyer APIs, analytics, logs, and buyer-facing evidence. ChatGPT submits increasing offers that never exceed the buyer's original ceiling. SpendSeal returns decreasing merchant counters for two rounds; the third offer is accepted at or above merchant authority or ends as `NO_DEAL` without a final counter.
+
+One buyer/product pair may have only one active deal, no more than three sessions in 24 hours, and no more than three offers per session. Policy changes invalidate unfinished deals. Idempotency and row locks prevent duplicate or concurrent accepted outcomes.
+
+### Negotiated PurchasePermit
+
+An accepted deal becomes a PurchasePermit bound to the buyer, merchant, exact Shopify revision and snapshot, public price, negotiated price, buyer ceiling, immutable policy version, accepted-offer hash, and deal expiry. ChatGPT cannot approve it. The signed-in buyer reviews public price, negotiated price, savings, refund terms, maximum, and expiry, then verifies a passkey.
 
 ### Razorpay execution
 
-After approval, SpendSeal automatically re-fetches the exact Shopify variant, runs deterministic policy, claims one local attempt, and only then creates a Razorpay Test Mode order. Webhook and payment signatures are verified using merchant-isolated encrypted credentials. Mock payments remain available for backup rehearsals but never count as Razorpay Test Mode GMV.
+After approval, SpendSeal re-fetches the exact Shopify variant and verifies the same public price, revision, snapshot, availability, active policy version, deal expiry, buyer authority, and encrypted merchant authority. It atomically claims one local attempt and creates the Razorpay Test Mode order for the negotiated amount—not the public amount. Webhook and payment signatures are verified using merchant-isolated encrypted credentials.
 
 ### Measured AI-commerce funnel
 
-The merchant's **AI Sales Channel** shows:
-
-1. AI catalog discoveries.
-2. Products shown to AI buyers.
-3. PurchasePermits created.
-4. Passkey approvals.
-5. Policy-allowed checkouts.
-6. Razorpay Test orders created.
-7. Razorpay Test payments verified.
-8. Policy denials.
-
-It also reports permit-to-approval rate, approval-to-payment rate, verified order count, **AI-attributed Test Mode GMV**, safely stopped purchases, and frequently selected products. Results are tenant isolated. Analytics store event identifiers and counts—not prompts, full addresses, tokens, card data, or payment credentials.
+The merchant's AI Sales Channel reports negotiations started, accepted and no-deal outcomes, average rounds, average public-price concession, deal-to-payment conversion, most-negotiated products, constraint-recovered Test orders, and constraint-recovered Test Mode GMV. Only verified Razorpay Test payments count. Mock, denied, expired, replayed, failed, and reconciliation-required outcomes add no GMV.
 
 ### Security boundary and graceful failure
 
-- **Explainable:** the buyer sees the exact product revision, quantity, maximum, refund requirement, price-change rule, and expiry.
-- **Bounded:** the PurchasePermit grants no general wallet or browsing authority.
+- **Explainable:** every visible offer, counter, acceptance, approval, revalidation, order, and verified payment is recorded.
+- **Bounded:** buyer offers cannot exceed the original ceiling; accepted prices cannot fall below encrypted merchant authority.
 - **Gated:** only the buyer's passkey can record approval.
-- **Independently checked:** SpendSeal re-reads Shopify after approval rather than trusting ChatGPT's earlier observation.
+- **Independently checked:** SpendSeal re-reads Shopify and the immutable deal-policy version after approval.
 - **Single use:** one permit can claim at most one order; replay produces `REPLAY_DETECTED`.
-- **Auditable:** every authorization and payment decision is SHA-256 hash-linked in an append-only PostgreSQL chain.
-- **Fails safely:** a changed price, exceeded budget, missing payment configuration, catalog refresh failure, or uncertain provider result creates no automatic retry.
+- **Auditable:** deals and PurchasePermits have separate SHA-256-linked append-only PostgreSQL chains; neither contains the merchant floor.
+- **Fails safely:** `NO_DEAL`, expired deals, catalog or policy changes, replay, and uncertain provider results create no payment retry.
 
 ### Browser-agent add-on
 
@@ -61,30 +56,38 @@ SpendSeal can also supervise Amazon India and Flipkart through a local Chromium 
 
 | Area | Demo status | Honest limitation |
 |---|---|---|
-| Shopify storefront + ChatGPT MCP + PurchasePermit | Primary demo path | Merchant catalog must be connected and synchronized |
-| Passkey approval + deterministic revalidation | Demo ready | Passkeys are bound to the exact production domain |
-| Razorpay payment and webhook | Razorpay Test Mode only | Test GMV is not real revenue |
-| Funnel analytics + readiness | Demo ready | Measures SpendSeal-attributed Test Mode events only |
-| Price-change or replay denial | Demo ready | Use a separately rehearsed permit for the failure scene |
+| Encrypted product deal policy + three-round negotiation | Primary demo path | One product, quantity one, INR and price-only in v1 |
+| Negotiated PurchasePermit + passkey revalidation | Demo ready | Passkeys are bound to the exact production domain |
+| Negotiated Razorpay payment and webhook | Razorpay Test Mode only | Test GMV is not real revenue |
+| Deal analytics + recovered Test Mode GMV | Demo ready | Counts only verified Razorpay Test payments |
+| `NO_DEAL`, policy change, catalog change or replay | Demo ready | Failure creates no new Razorpay order |
 | Amazon India and Flipkart browser supervision | Optional secondary demo | Site layout and anti-bot controls can interrupt it |
 | Public production release | Not ready | Needs operational monitoring, legal review, and public app distribution |
 
 ## Five-minute Razorpay Buildathon demo
 
-1. **0:00-0:30 — Merchant problem.** Show the SpendSeal dashboard. Say: “Millions of merchants have websites designed for humans, but AI agents cannot reliably discover their catalogs, understand their checkout rules, or purchase with bounded authority. SpendSeal turns an existing Shopify and Razorpay merchant into an AI-transactable merchant.”
-2. **0:30-1:00 — Merchant becomes AI-ready.** Show Shopify connected, Razorpay Test Mode connected, the readiness badge, and the copyable ChatGPT prompt. Say: “The merchant connects an authoritative Shopify catalog and Razorpay Test Mode once. SpendSeal exposes a structured storefront while keeping product truth under merchant control.”
-3. **1:00-1:45 — ChatGPT discovers the merchant.** Paste the sample prompt into ChatGPT, open the merchant storefront, list products below the chosen amount, and select one. Say: “ChatGPT reads live authoritative products. It can search, explain, and recommend, but it cannot invent prices or approve a purchase.”
-4. **1:45-2:30 — Create bounded authority.** Create the PurchasePermit and show product, quantity, maximum total, price-change rule, and expiry. Approve with the buyer's passkey. Say: “This is not open-ended spending permission. ChatGPT cannot approve it; the buyer's passkey is required.”
-5. **2:30-3:15 — Razorpay Test Mode payment.** Prepare checkout and complete the rehearsed Test payment. Say: “SpendSeal re-fetches the exact Shopify variant, runs deterministic policy, claims one payment attempt, and only then creates the Razorpay Test order.”
-6. **3:15-3:45 — Prove merchant value.** Return to the AI Sales Channel and show the updated funnel, one verified Test order, and the exact Test GMV. Say: “The merchant can measure discovery, authorization, policy approval, and Razorpay-verified Test conversion end to end.”
-7. **3:45-4:20 — Audit evidence.** Open the PurchasePermit chain. Show `PURCHASE_PERMIT_CREATED`, passkey confirmation, `POLICY_ALLOWED`, `PAYMENT_ORDER_CREATED`, `PAYMENT_VERIFIED`, and valid chain verification.
-8. **4:20-4:45 — Graceful failure.** Show either a changed-price permit with `PRICE_CHANGED` / `BUDGET_EXCEEDED`, or replay the paid permit and show `REPLAY_DETECTED`. Point out that no second Razorpay order exists.
-9. **4:45-5:00 — Close.** Say: “SpendSeal gives merchants an AI sales channel without giving AI agents unrestricted financial authority. The merchant controls product truth, the buyer controls authorization, SpendSeal verifies, and Razorpay executes.”
+1. **0:00-0:35 — Lost conversion.** Show a Shopify product at ₹49.95. Say: “The buyer's hard maximum is ₹45, so the normal checkout cannot convert. The merchant could accept less, but cannot publish their private minimum.”
+2. **0:35-1:05 — Private merchant authority.** In **Merchant AI Sales Closer**, enable negotiation and enter ₹42. Say: “This exact floor is AES-256-GCM encrypted and versioned. ChatGPT, the buyer, analytics, logs and buyer-facing evidence never receive it.”
+3. **1:05-2:05 — Agents create the deal.** Ask ChatGPT to buy with a ₹45 hard maximum. Start at ₹40, show counters around ₹47.97 and ₹45.18, then offer ₹44.50. Say: “Buyer offers only rise, merchant counters only fall, and neither agent can cross its principal's authority.”
+4. **2:05-2:45 — Seal and approve.** Create the negotiated PurchasePermit. Show ₹49.95 public, ₹44.50 negotiated, ₹5.45 savings, ₹45 maximum, expiry and Shopify revision. Approve with a passkey. Say: “ChatGPT can negotiate but cannot approve or pay.”
+5. **2:45-3:30 — One Razorpay Test payment.** Prepare checkout and complete the rehearsed Test payment. Say: “SpendSeal re-fetches Shopify, decrypts and rechecks merchant authority, verifies the buyer ceiling and claims exactly one order at ₹44.50.”
+6. **3:30-4:00 — Measured value.** Return to the dashboard and show one constraint-recovered Test order and ₹44.50 recovered Test Mode GMV. Say: “This conversion was recovered because public price exceeded the buyer's original ceiling.”
+7. **4:00-4:30 — Explainable evidence.** Open the deal and permit audit chains. Show offers, counters, acceptance, passkey, revalidation, Razorpay order, payment verification, and valid hash chains. Point out that the floor is absent.
+8. **4:30-4:50 — Graceful failure.** Replay the paid permit for `REPLAY_DETECTED`, then show a buyer maximum below merchant authority ending in `NO_DEAL`, no permit and no Razorpay order.
+9. **4:50-5:00 — Close.** Say: “SpendSeal does not merely expose a catalog to AI. It lets buyer and merchant agents create a deal neither side can violate, then turns that agreement into one verified Razorpay payment.”
 
 Keep a mock-adapter permit ready as a zero-cost backup if the hosted Test checkout or network is unavailable. Label it clearly as mock evidence. Never display Shopify tokens, Razorpay keys, webhook secrets, full addresses, card details, OTPs, or UPI PINs.
 
 ## What is implemented
 
+- A merchant **AI Sales Closer** for enabling negotiation per Shopify product with an exact private minimum encrypted in the versioned AES-256-GCM credential vault.
+- Immutable deal-policy versions. Updating or disabling a policy invalidates every unfinished deal and negotiated permit tied to the older authority.
+- A deterministic ten-minute negotiation state machine with at most three increasing buyer offers, decreasing merchant counters, one active buyer/product deal, three sessions per 24 hours, idempotency, and concurrency-safe final acceptance.
+- Four buyer-bound MCP tools for starting, countering, reading, and sealing a negotiation. Merchant floors and buyer ceilings are not exposed to the opposite party.
+- Negotiated PurchasePermits that preserve the public Shopify evidence while separately binding the accepted amount, savings, policy version, accepted-offer hash and deal expiry.
+- Final negotiated policy evaluation that re-fetches Shopify, decrypts current merchant authority, checks the unchanged policy version and buyer ceiling, and creates the Razorpay Test order for the negotiated amount.
+- A separate append-only SHA-256 deal chain covering visible offers, counters, acceptance or `NO_DEAL`, passkey approval, final revalidation, Razorpay order, verified payment and replay denial—without the merchant floor.
+- Merchant deal analytics for starts, acceptances, no-deal outcomes, conversion, average rounds, average concession, most-negotiated products, constraint-recovered Test orders and constraint-recovered Test Mode GMV.
 - PostgreSQL 16 with explicit migrations and tenant-safe composite catalog references.
 - A merchant **AI Sales Channel** with four plain-language readiness states: `Not ready`, `Catalog ready`, `AI transactable`, and `Payment verified`.
 - A focused, agent-readable merchant storefront containing only active authoritative products, current terms, Test Mode checkout capability, and accurate evidence assurance.
@@ -113,7 +116,7 @@ The browser-agent build has been verified with:
 
 - A clean TypeScript project-reference type check.
 - Successful Vercel and Docker production builds.
-- All 48 unit and PostgreSQL integration tests passing across six test files, including policy, cryptography, Shopify, OAuth rotation, tenant isolation, merchant readiness, storefront filtering, analytics deduplication, Test Mode GMV accuracy, product-review invalidation, payment concurrency, replay denial, adapter fixtures, and both audit chains.
+- All 57 unit and PostgreSQL integration tests passing across seven test files, including negotiation thresholds, encrypted-floor privacy, monotonic offers, `NO_DEAL`, policy invalidation, negotiated payment amount, recovered-GMV accounting, ordinary policy, cryptography, Shopify, OAuth rotation, tenant isolation, analytics, payment concurrency, replay denial, browser adapter fixtures, and audit chains.
 - A healthy OrbStack Compose stack with PostgreSQL migrations ready at `/api/v1/health`.
 - Extension package inspection confirming the six required Manifest V3 files are present in the downloadable ZIP; SpendSeal itself is the only permanent host and each shopping site is requested at runtime for one task.
 - A production-container dependency audit reporting no known runtime vulnerabilities.
@@ -199,12 +202,13 @@ The app process applies verified SQL migrations before listening. `/api/v1/healt
 1. Register a SpendSeal account with a device passkey.
 2. Create your merchant trust domain.
 3. Connect a Shopify development store and synchronize its real catalog, or publish a product manually.
-4. Connect the deterministic mock adapter for a zero-cost demo, or connect that merchant’s Razorpay Test account.
-5. Select the product in the buyer view and set the maximum spend, refund requirement, price-change policy, and expiry.
-6. Create the PurchasePermit and open its one-time approval URL.
-7. Approve with the same buyer account’s passkey.
-8. Run the deterministic policy check and complete the Test Mode checkout.
-9. Open the PurchasePermit audit explorer and verify its SHA-256 hash-linked chain.
+4. Select a product in **Merchant AI Sales Closer**, enter a private minimum below its public price, and enable negotiation.
+5. Connect that merchant's Razorpay Test account. The mock adapter is useful only as a clearly labeled backup and does not count as recovered GMV.
+6. Reconnect ChatGPT to SpendSeal so it discovers the `deals:create` and `deals:read` scopes and the four negotiation tools.
+7. Ask ChatGPT to negotiate the selected product under a hard maximum. Submit up to three increasing offers.
+8. When accepted, create the negotiated PurchasePermit and open its one-time approval URL.
+9. Approve with the same buyer account's passkey, run final revalidation, and complete the Razorpay Test checkout.
+10. Verify the separate deal and PurchasePermit chains and return to the dashboard to see constraint-recovered Test Mode GMV.
 
 The merchant controls authoritative product facts. The buyer controls authorization constraints. Neither ChatGPT nor an approval URL can approve the payment.
 
@@ -302,6 +306,10 @@ Implemented MCP tools:
 | `list_merchants` | `catalog:read` | Discovers active merchants |
 | `list_products` | `catalog:read` | Reads one merchant’s active authoritative catalog |
 | `get_merchant_storefront` | `catalog:read` | Returns one merchant's active products, terms, checkout capability, evidence assurance, and AI-sales readiness |
+| `start_price_negotiation` | `deals:create` | Starts a ten-minute deal with one first offer under the OAuth buyer's hard maximum |
+| `counter_price_negotiation` | `deals:create` | Submits the next strictly higher buyer offer, up to three total offers |
+| `get_price_negotiation` | `deals:read` | Returns only that OAuth buyer's visible offers, counters and accepted terms—never the merchant floor |
+| `create_negotiated_purchase_permit` | `intents:create` | Seals one accepted unused deal into a passkey-gated single-use PurchasePermit |
 | `create_purchase_permit` | `intents:create` | Creates a mandate for the OAuth buyer; buyer ID is never accepted as input |
 | `get_purchase_permit` | `intents:read` | Returns only the OAuth buyer’s mandate |
 | `prepare_checkout` | `checkout:prepare` | Runs policy and claims at most one Test Mode order |
@@ -356,18 +364,21 @@ To rotate credential encryption safely, generate a new 32-byte base64 key, incre
 
 ```mermaid
 flowchart LR
-  Merchant[Merchant] -->|Connect once| Gateway[SpendSeal AI Checkout Gateway]
+  Merchant[Merchant] -->|Encrypted private minimum| Deal[SpendSeal Deal Policy Agent]
   Shopify[Shopify Admin GraphQL] -->|Authoritative products| Gateway
-  Gateway -->|Agent-readable storefront| MCP[SpendSeal MCP]
-  GPT[ChatGPT] -->|OAuth buyer| MCP
-  MCP --> Lock[Protected PurchasePermit]
+  Gateway[SpendSeal] -->|Agent-readable storefront| MCP[SpendSeal MCP]
+  GPT[ChatGPT buyer agent] -->|Private buyer maximum + offers| MCP
+  MCP --> Deal
+  Deal -->|Visible counters / accepted terms| GPT
+  Deal -->|Sealed accepted price| Lock[Negotiated PurchasePermit]
   Buyer[Buyer browser] -->|Passkey approval| Lock
   Lock --> Policy[Deterministic policy engine]
   Shopify -->|Exact variant re-fetch| Policy
+  Deal -->|Encrypted authority + immutable version| Policy
   Policy -->|single local claim| Orders[(Payment attempts)]
   Orders --> Razorpay[Razorpay Test Mode]
-  Razorpay --> Funnel[AI Sales Channel funnel + Test GMV]
-  Gateway --> Audit[(Hash-linked decision evidence)]
+  Razorpay --> Funnel[Constraint-recovered Test Mode GMV]
+  Gateway --> Audit[(Separate deal + permit hash chains)]
   Gateway --> PG[(PostgreSQL 16)]
   GPT -. optional browser supervision .-> Extension[Amazon / Flipkart extension]
 ```
@@ -386,9 +397,9 @@ evals                 ChatGPT MCP prompt evaluation material
 
 ## Scope
 
-Included: Razorpay Test Mode, merchant AI-sales readiness and funnel analytics, agent-readable Shopify storefronts, local zero-cost deployment, multi-user/multi-merchant tenancy, product revisions, OAuth-bound MCP, passkeys, deterministic authorization, replay prevention, webhook verification, and tamper-evident audit evidence.
+Included: one-product quantity-one INR price negotiation, encrypted merchant minimums, private buyer ceilings, three-round deterministic bargaining, Razorpay Test Mode, constraint-recovered GMV analytics, agent-readable Shopify storefronts, multi-user/multi-merchant tenancy, OAuth-bound MCP, passkeys, replay prevention, webhook verification, and tamper-evident audit evidence.
 
-Out of scope: KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, automatic recharge, password recovery/email delivery, Shopify write access or automatic catalog webhooks, card/CVV/UPI-PIN/OTP storage or entry, anti-bot bypass, and externally anchored audit storage.
+Out of scope: quantities other than one, bundles, add-ons, non-INR negotiation, free-form contract terms, LLM-generated merchant strategy, KYC, legal identity verification, independent merchant truth verification, refund fulfilment, subscriptions, automatic recharge, Shopify write access, card/CVV/UPI-PIN/OTP storage or entry, anti-bot bypass, and externally anchored audit storage.
 
 ### About “buy from any website”
 

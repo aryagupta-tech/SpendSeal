@@ -4,7 +4,7 @@ export const PRICE_CHANGE_POLICIES = ["none", "decrease_only", "within_cap"] as 
 export const INTENT_STATUSES = ["pending_confirmation", "confirmed", "executing", "checkout_ready", "paid", "denied", "expired", "reconciliation_required"] as const;
 export const MERCHANT_ROLES = ["owner", "admin", "catalog_manager", "auditor"] as const;
 export const API_KEY_SCOPES = ["catalog:read", "catalog:write", "orders:read", "audit:read"] as const;
-export const MCP_SCOPES = ["catalog:read", "intents:create", "intents:read", "checkout:prepare", "audit:read", "shopping:create", "shopping:read", "shopping:audit"] as const;
+export const MCP_SCOPES = ["catalog:read", "intents:create", "intents:read", "checkout:prepare", "audit:read", "deals:create", "deals:read", "shopping:create", "shopping:read", "shopping:audit"] as const;
 export const BROWSER_SCOPES = ["browser:tasks:read", "browser:observations:write", "browser:execute"] as const;
 export const SHOPPING_SITES = ["amazon_in", "flipkart_in", "openai_api", "generic_web"] as const;
 export const SHOPPING_TASK_STATUSES = [
@@ -15,9 +15,12 @@ export const SHOPPING_TASK_STATUSES = [
 export const MERCHANT_READINESS_STATUSES = ["not_ready", "catalog_ready", "ai_transactable", "payment_verified"] as const;
 export const AI_COMMERCE_EVENT_TYPES = [
   "CATALOG_DISCOVERED", "PRODUCTS_PRESENTED", "PURCHASE_PERMIT_CREATED", "PASSKEY_APPROVED", "POLICY_ALLOWED", "POLICY_DENIED",
-  "PAYMENT_ORDER_CREATED", "PAYMENT_VERIFIED", "REPLAY_BLOCKED",
+  "PAYMENT_ORDER_CREATED", "PAYMENT_VERIFIED", "REPLAY_BLOCKED", "NEGOTIATION_STARTED", "DEAL_ACCEPTED", "DEAL_REJECTED",
 ] as const;
-export const AI_COMMERCE_SOURCES = ["chatgpt_mcp", "buyer_web", "policy_engine", "razorpay", "mock_adapter", "system"] as const;
+export const AI_COMMERCE_SOURCES = ["chatgpt_mcp", "buyer_web", "merchant_agent", "policy_engine", "razorpay", "mock_adapter", "system"] as const;
+
+export const DEAL_STATUSES = ["negotiating", "accepted", "rejected", "expired", "invalidated", "permit_created", "reconciliation_required", "paid"] as const;
+export const DEAL_RESPONSES = ["counter", "accepted", "rejected"] as const;
 
 export const PriceChangePolicySchema = z.enum(PRICE_CHANGE_POLICIES);
 export type PriceChangePolicy = z.infer<typeof PriceChangePolicySchema>;
@@ -58,7 +61,7 @@ export type MerchantReadiness = z.infer<typeof MerchantReadinessSchema>;
 
 export const MerchantStorefrontSchema = z.object({
   merchant: MerchantSchema.pick({ id: true, slug: true, displayName: true, status: true }),
-  products: z.array(ProductSchema), supportedCurrency: z.literal("INR"), refundTermsAuthority: z.literal("merchant_stated"),
+  products: z.array(ProductSchema.extend({ negotiationAvailable: z.boolean() })), supportedCurrency: z.literal("INR"), refundTermsAuthority: z.literal("merchant_stated"),
   checkout: z.object({ purchasePermitAvailable: z.boolean(), buyerPasskeyRequired: z.literal(true), razorpayTestModeAvailable: z.boolean(), evidenceAssurance: z.enum(["merchant_managed", "provider_verified"]), livePaymentMode: z.literal("test") }),
   readiness: MerchantReadinessSchema,
 });
@@ -70,6 +73,10 @@ export const MerchantAiSalesSummarySchema = z.object({
   razorpayTestOrdersCreated: z.number().int().nonnegative(), razorpayTestPaymentsVerified: z.number().int().nonnegative(), testGmvPaise: z.number().int().nonnegative(),
   safelyStoppedPurchases: z.number().int().nonnegative(), permitToApprovalRate: z.number().min(0).max(100), approvalToPaymentRate: z.number().min(0).max(100),
   topProducts: z.array(z.object({ productId: z.string().uuid(), name: z.string(), selections: z.number().int().positive() })),
+  negotiationsStarted: z.number().int().nonnegative(), dealsAccepted: z.number().int().nonnegative(), noDealOutcomes: z.number().int().nonnegative(),
+  negotiatedPaymentsVerified: z.number().int().nonnegative(), constraintRecoveredTestOrders: z.number().int().nonnegative(), constraintRecoveredTestGmvPaise: z.number().int().nonnegative(),
+  dealToPaymentRate: z.number().min(0).max(100), averageNegotiationRounds: z.number().nonnegative(), averagePublicPriceConcessionPercent: z.number().min(0).max(100),
+  topNegotiatedProducts: z.array(z.object({ productId: z.string().uuid(), name: z.string(), negotiations: z.number().int().positive() })),
 });
 export type MerchantAiSalesSummary = z.infer<typeof MerchantAiSalesSummarySchema>;
 
@@ -91,6 +98,11 @@ export const PurchasePermitSchema = z.object({
   maxTotalPaise: z.number().int().positive(), priceChangePolicy: PriceChangePolicySchema, requireRefundable: z.boolean(),
   minimumRefundWindowDays: z.number().int().nonnegative().nullable(), expiresAt: z.string().datetime(), confirmationRequired: z.literal(true),
   confirmedAt: z.string().datetime().nullable(), idempotencyKey: z.string(), status: z.enum(INTENT_STATUSES), createdAt: z.string().datetime(),
+  negotiatedDeal: z.object({
+    dealSessionId: z.string().uuid(), dealPolicyId: z.string().uuid(), dealPolicyVersion: z.number().int().positive(),
+    publicUnitPricePaise: z.number().int().positive(), negotiatedUnitPricePaise: z.number().int().positive(), buyerMaxTotalPaise: z.number().int().positive(),
+    acceptedOfferSnapshotHash: z.string(), dealExpiresAt: z.string().datetime(), savingsPaise: z.number().int().nonnegative(),
+  }).nullable().optional(),
 });
 export type PurchasePermit = z.infer<typeof PurchasePermitSchema>;
 
@@ -103,6 +115,8 @@ export const REASON_CODES = [
   "LIVE_PURCHASE_DISABLED", "ADDRESS_CHANGED", "DELIVERY_CHANGED", "PAYMENT_METHOD_CHANGED", "PAYMENT_OPTION_UNAVAILABLE",
   "PRODUCT_REVIEW_REQUIRED", "SITE_PERMISSION_REQUIRED", "SENSITIVE_FIELD_BLOCKED", "RECURRING_BILLING_DETECTED",
   "FINAL_ACTION_UNVERIFIABLE", "FX_QUOTE_UNAVAILABLE", "ACCOUNT_CHANGED",
+  "NO_DEAL", "DEAL_EXPIRED", "DEAL_POLICY_CHANGED", "CATALOG_CHANGED", "OFFER_ABOVE_BUYER_LIMIT",
+  "OFFER_BELOW_MERCHANT_AUTHORITY", "NEGOTIATION_LIMIT_REACHED",
 ] as const;
 export const ReasonCodeSchema = z.enum(REASON_CODES);
 export type ReasonCode = z.infer<typeof ReasonCodeSchema>;
@@ -114,11 +128,11 @@ export const PolicyDecisionSchema = z.object({
 });
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 
-export const AuditActorSchema = z.enum(["chatgpt", "buyer", "merchant", "policy_engine", "mock_adapter", "razorpay", "system"]);
+export const AuditActorSchema = z.enum(["chatgpt", "buyer", "merchant", "merchant_agent", "policy_engine", "mock_adapter", "razorpay", "system"]);
 export type AuditActor = z.infer<typeof AuditActorSchema>;
 
 export const AuditEventSchema = z.object({
-  id: z.string().uuid(), sequence: z.number().int().positive(), scopeType: z.enum(["intent", "merchant"]), scopeId: z.string().uuid(),
+  id: z.string().uuid(), sequence: z.number().int().positive(), scopeType: z.enum(["intent", "merchant", "deal"]), scopeId: z.string().uuid(),
   merchantId: z.string().uuid(), purchasePermitId: z.string().uuid().nullable(), eventType: z.string(), actor: AuditActorSchema,
   reasonCode: ReasonCodeSchema.nullable(), payload: z.unknown(), previousHash: z.string(), hash: z.string(), createdAt: z.string().datetime(),
 });

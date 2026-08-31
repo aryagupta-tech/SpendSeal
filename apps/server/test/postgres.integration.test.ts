@@ -44,6 +44,72 @@ async function approvedBrowserTask(username: string) {
 }
 
 describe("PostgreSQL tenant and payment invariants", () => {
+  it("negotiates three visible rounds without exposing the encrypted merchant minimum", async () => {
+    const owner = await user("deal-owner"); const buyer = await user("deal-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "deal-shop", displayName: "Deal Shop" });
+    const product = await store.createProduct(owner.id, merchant.id, { sku: "DEAL-1", name: "Selling Plans Ski Wax", description: "Negotiable product", pricePaise: 4_995, refundable: false, refundWindowDays: 0 });
+    await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
+    const encrypted = await pool.query("SELECT floor_price_ciphertext FROM merchant_deal_policies WHERE merchant_id=$1", [merchant.id]); expect(encrypted.rows[0].floor_price_ciphertext).not.toContain("4200");
+    const started = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "deal-three-rounds" });
+    expect(started.rounds[0]).toMatchObject({ response: "counter", merchantCounterPaise: 4_797 });
+    const second = await service.deals.counter({ buyerId: buyer.id, dealSessionId: started.id, offerPaise: 4_300 }); expect(second.rounds[1]).toMatchObject({ response: "counter", merchantCounterPaise: 4_518 });
+    const accepted = await service.deals.counter({ buyerId: buyer.id, dealSessionId: started.id, offerPaise: 4_450 }); expect(accepted).toMatchObject({ status: "accepted", acceptedPricePaise: 4_450, roundCount: 3 });
+    const events = await store.auditTrail("deal", started.id); const serialized = JSON.stringify({ deal: accepted, events }); expect(serialized).not.toContain("minimumPricePaise"); expect(serialized).not.toContain("floor_price");
+    expect(JSON.stringify(events)).not.toContain("buyerMaxTotalPaise");
+    expect(await store.verifyAudit("deal", started.id)).toMatchObject({ valid: true, brokenAt: null });
+  });
+
+  it("makes negotiation starts idempotent and enforces increasing buyer offers", async () => {
+    const owner = await user("rules-owner"); const buyer = await user("rules-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "rules-shop", displayName: "Rules Shop" });
+    const product = await store.createProduct(owner.id, merchant.id, { sku: "RULES-1", name: "Negotiation Rules", description: "Bounded offers", pricePaise: 4_995, refundable: false, refundWindowDays: 0 });
+    await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
+    const first = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "same-negotiation-start" });
+    const replay = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "same-negotiation-start" });
+    expect(replay.id).toBe(first.id); expect(replay.rounds).toHaveLength(1);
+    await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 3_999 })).rejects.toMatchObject({ code: "NEGOTIATION_LIMIT_REACHED" });
+    await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 4_501 })).rejects.toMatchObject({ code: "OFFER_ABOVE_BUYER_LIMIT" });
+  });
+
+  it("seals an accepted deal into one passkey-gated payment at the negotiated amount", async () => {
+    const owner = await user("seal-owner"); const buyer = await user("seal-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "seal-shop", displayName: "Seal Shop" }); await service.configurePayments(merchant.id, { adapter: "mock" });
+    const product = await store.createProduct(owner.id, merchant.id, { sku: "SEAL-1", name: "Negotiated Wax", description: "Negotiable product", pricePaise: 4_995, refundable: false, refundWindowDays: 0 }); await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
+    let deal = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "seal-accepted-deal" }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_300 }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_450 });
+    const created = await service.deals.createPermit({ buyerId: buyer.id, dealSessionId: deal.id }); expect(created.intent.negotiatedDeal).toMatchObject({ publicUnitPricePaise: 4_995, negotiatedUnitPricePaise: 4_450, savingsPaise: 545 });
+    const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, created.approvalToken!); await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: "cred_seal-buyer", counter: 1, deviceType: "singleDevice", backedUp: false });
+    const checkout = await service.prepareCheckout(buyer.id, created.intent.id); expect(checkout.checkoutUrl).toBeTruthy(); const order = await store.getOrderByIntent(created.intent.id); expect(order?.amountPaise).toBe(4_450);
+    const replay = await service.prepareCheckout(buyer.id, created.intent.id); expect(replay.decision.reasons).toContain("REPLAY_DETECTED"); expect((await pool.query("SELECT COUNT(*)::int AS count FROM payment_orders WHERE intent_lock_id=$1", [created.intent.id])).rows[0].count).toBe(1);
+  });
+
+  it("counts only a verified Razorpay negotiated payment as constraint-recovered Test Mode GMV", async () => {
+    const owner = await user("recovered-owner"); const buyer = await user("recovered-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "recovered-shop", displayName: "Recovered Shop" });
+    const product = await store.createProduct(owner.id, merchant.id, { sku: "RECOVERED-1", name: "Recovered Wax", description: "Would fail at public price", pricePaise: 4_995, refundable: false, refundWindowDays: 0 });
+    await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
+    let deal = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "recovered-deal" });
+    deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_300 }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_450 });
+    const created = await service.deals.createPermit({ buyerId: buyer.id, dealSessionId: deal.id }); const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, created.approvalToken!);
+    await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: "cred_recovered-buyer", counter: 1, deviceType: "singleDevice", backedUp: false });
+    const razorpayConfig = await store.savePaymentConfig(merchant.id, { adapter: "razorpay", keyId: "rzp_test_recovered", keySecretCiphertext: service.vault.encrypt("test-secret"), webhookSecretCiphertext: service.vault.encrypt("test-webhook"), encryptionKeyVersion: service.vault.version });
+    const claim = await service.deals.prepareOrderClaim(created.intent.id, buyer.id, razorpayConfig.version); expect(claim.kind).toBe("claimed"); if (claim.kind !== "claimed") throw new Error("Expected claimed negotiated order");
+    const order = await store.completeOrder(claim.order.id, "order_test_recovered", "razorpay"); await store.markPaid(order.id, "pay_test_recovered", "razorpay");
+    const summary = await store.merchantAiSalesSummary(merchant.id); expect(summary).toMatchObject({ constraintRecoveredTestOrders: 1, constraintRecoveredTestGmvPaise: 4_450, negotiatedPaymentsVerified: 1 });
+    expect(await store.verifyAudit("deal", deal.id)).toMatchObject({ valid: true, brokenAt: null });
+  });
+
+  it("returns NO_DEAL without a final counter, permit, or payment order", async () => {
+    const owner = await user("nodeal-owner"); const buyer = await user("nodeal-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "nodeal-shop", displayName: "No Deal Shop" });
+    const product = await store.createProduct(owner.id, merchant.id, { sku: "NO-DEAL-1", name: "Protected Product", description: "Negotiable product", pricePaise: 4_995, refundable: false, refundWindowDays: 0 }); await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
+    let deal = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_100, initialOfferPaise: 3_900, idempotencyKey: "no-deal-session" });
+    deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_000 }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_100 });
+    expect(deal.status).toBe("rejected"); expect(deal.rounds.at(-1)).toMatchObject({ response: "rejected", merchantCounterPaise: null, reasonCode: "NO_DEAL" }); expect(deal.purchasePermitId).toBeNull();
+    await expect(service.deals.createPermit({ buyerId: buyer.id, dealSessionId: deal.id })).rejects.toMatchObject({ code: "NO_DEAL" }); expect((await pool.query("SELECT COUNT(*)::int AS count FROM payment_orders WHERE merchant_id=$1", [merchant.id])).rows[0].count).toBe(0);
+  });
+
+  it("invalidates unfinished deals when the private merchant authority changes", async () => {
+    const owner = await user("policy-owner"); const buyer = await user("policy-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "policy-deal-shop", displayName: "Policy Deal Shop" }); const product = await store.createProduct(owner.id, merchant.id, { sku: "POLICY-DEAL", name: "Policy Product", description: "Negotiable product", pricePaise: 5_000, refundable: false, refundWindowDays: 0 });
+    await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_000, actorUserId: owner.id }); const deal = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_100, idempotencyKey: "policy-change-deal" });
+    await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id }); await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_300 })).rejects.toMatchObject({ code: "DEAL_POLICY_CHANGED" });
+    expect((await service.deals.get(buyer.id, deal.id)).status).toBe("invalidated");
+  });
+
   it("keeps products and PurchasePermits isolated across merchants and buyers", async () => {
     const first = await approvedIntent("buyer-a"); const outsider = await user("outsider"); const second = await merchantProduct("owner-b");
     expect(await store.getProduct(second.merchant.id, first.product.id)).toBeNull();

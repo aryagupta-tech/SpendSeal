@@ -67,10 +67,32 @@ export const paymentConfigurations = pgTable("merchant_payment_configurations", 
   keySecretCiphertext: text("key_secret_ciphertext"), webhookSecretCiphertext: text("webhook_secret_ciphertext"), encryptionKeyVersion: integer("encryption_key_version").notNull(), version: integer("version").notNull(), active: boolean("active").notNull().default(true), createdAt: createdAt(),
 }, (table) => [uniqueIndex("payment_config_merchant_version_unique").on(table.merchantId, table.version)]);
 
+export const merchantDealPolicies = pgTable("merchant_deal_policies", {
+  id: uuid("id").primaryKey(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").notNull().references(() => products.id),
+  version: integer("version").notNull(), floorPriceCiphertext: text("floor_price_ciphertext").notNull(), encryptionKeyVersion: integer("encryption_key_version").notNull(),
+  active: boolean("active").notNull().default(true), createdBy: uuid("created_by").notNull().references(() => users.id), createdAt: createdAt(),
+}, (table) => [uniqueIndex("merchant_deal_policy_version_unique").on(table.merchantId, table.productId, table.version), index("merchant_deal_policies_latest_idx").on(table.merchantId, table.productId, table.version)]);
+
+export const dealSessions = pgTable("deal_sessions", {
+  id: uuid("id").primaryKey(), buyerId: uuid("buyer_id").notNull().references(() => users.id), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").notNull().references(() => products.id),
+  productRevisionId: uuid("product_revision_id").notNull().references(() => productRevisions.id), productSnapshotHash: text("product_snapshot_hash").notNull(), productName: text("product_name").notNull(),
+  publicPricePaise: integer("public_price_paise").notNull(), buyerMaxTotalPaise: integer("buyer_max_total_paise").notNull(), policyId: uuid("policy_id").notNull().references(() => merchantDealPolicies.id), policyVersion: integer("policy_version").notNull(),
+  status: text("status").notNull(), roundCount: integer("round_count").notNull().default(0), merchantLastCounterPaise: integer("merchant_last_counter_paise"), acceptedPricePaise: integer("accepted_price_paise"),
+  acceptedOfferSnapshotHash: text("accepted_offer_snapshot_hash"), purchasePermitId: uuid("purchase_permit_id"), idempotencyKey: text("idempotency_key").notNull(), expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  createdAt: createdAt(), updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("deal_sessions_buyer_idempotency_unique").on(table.buyerId, table.idempotencyKey), index("deal_sessions_rate_limit_idx").on(table.buyerId, table.productId, table.createdAt), index("deal_sessions_merchant_idx").on(table.merchantId, table.createdAt)]);
+
+export const dealRounds = pgTable("deal_rounds", {
+  id: uuid("id").primaryKey(), dealSessionId: uuid("deal_session_id").notNull().references(() => dealSessions.id), sequence: integer("sequence").notNull(), buyerOfferPaise: integer("buyer_offer_paise").notNull(),
+  response: text("response").notNull(), merchantCounterPaise: integer("merchant_counter_paise"), reasonCode: text("reason_code"), offerSnapshotHash: text("offer_snapshot_hash").notNull(), createdAt: createdAt(),
+}, (table) => [uniqueIndex("deal_round_sequence_unique").on(table.dealSessionId, table.sequence), uniqueIndex("deal_round_offer_unique").on(table.dealSessionId, table.buyerOfferPaise)]);
+
 export const purchasePermits = pgTable("intent_locks", {
   id: uuid("id").primaryKey(), buyerId: uuid("buyer_id").notNull().references(() => users.id), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").notNull().references(() => products.id), productRevisionId: uuid("product_revision_id").notNull().references(() => productRevisions.id),
   quantity: integer("quantity").notNull().default(1), currency: text("currency").notNull().default("INR"), productSnapshotHash: text("product_snapshot_hash").notNull(), lockedUnitPricePaise: integer("locked_unit_price_paise").notNull(), maxTotalPaise: integer("max_total_paise").notNull(), priceChangePolicy: text("price_change_policy").notNull(), requireRefundable: boolean("require_refundable").notNull(), minimumRefundWindowDays: integer("minimum_refund_window_days"),
-  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), idempotencyKey: text("idempotency_key").notNull().unique(), approvalTokenHash: text("approval_token_hash").notNull(), approvalTokenExchangedAt: timestamp("approval_token_exchanged_at", { withTimezone: true, mode: "string" }), status: text("status").notNull(), createdAt: createdAt(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(), confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: "string" }), idempotencyKey: text("idempotency_key").notNull().unique(), approvalTokenHash: text("approval_token_hash").notNull(), approvalTokenExchangedAt: timestamp("approval_token_exchanged_at", { withTimezone: true, mode: "string" }), status: text("status").notNull(),
+  dealSessionId: uuid("deal_session_id").references(() => dealSessions.id), dealPolicyId: uuid("deal_policy_id").references(() => merchantDealPolicies.id), dealPolicyVersion: integer("deal_policy_version"),
+  publicUnitPricePaise: integer("public_unit_price_paise"), negotiatedUnitPricePaise: integer("negotiated_unit_price_paise"), acceptedOfferSnapshotHash: text("accepted_offer_snapshot_hash"), dealExpiresAt: timestamp("deal_expires_at", { withTimezone: true, mode: "string" }), createdAt: createdAt(),
 }, (table) => [index("intent_buyer_idx").on(table.buyerId), index("intent_merchant_idx").on(table.merchantId)]);
 
 export const approvalSessions = pgTable("approval_sessions", {

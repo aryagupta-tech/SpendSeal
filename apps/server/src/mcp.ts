@@ -9,7 +9,7 @@ import { SpendSealStore } from "./store.js";
 import { BrowserAgentService } from "./browser-agent.js";
 
 export async function handleMcpRequest(service: SpendSealService, store: SpendSealStore, browserAgent: BrowserAgentService, principal: OAuthPrincipal, req: Request, res: Response): Promise<void> {
-  const server = new McpServer({ name: "spendseal", version: "2.1.0" }, { instructions: "SpendSeal is an AI Checkout Gateway for merchants. It publishes authoritative, agent-readable Shopify storefronts and turns a buyer request into one bounded PurchasePermit executed through Razorpay Test Mode. ChatGPT may discover and explain products and create a permit, but it cannot approve a product, approve a PurchasePermit, raise a spending limit, bypass the buyer's passkey, or invoke an unprotected payment." });
+  const server = new McpServer({ name: "spendseal", version: "3.0.0" }, { instructions: "SpendSeal is a bounded AI dealmaker. It lets an authenticated buyer agent make at most three increasing offers against a merchant's encrypted private authority, without revealing the merchant minimum. An accepted deal becomes one expiring PurchasePermit executed through Razorpay Test Mode. ChatGPT may negotiate and create the permit, but it cannot change the buyer ceiling, approve the deal, bypass the buyer's passkey, or invoke payment." });
 
   server.registerTool("list_merchants", { title: "Discover SpendSeal merchants", description: "Find active merchants that publish authoritative catalogs through SpendSeal.", inputSchema: { query: z.string().max(100).optional(), cursor: z.string().uuid().optional() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ query, cursor }) => {
     requireScope(principal, "catalog:read"); const result = await store.listMerchants({ query, cursor, limit: 50 });
@@ -27,6 +27,28 @@ export async function handleMcpRequest(service: SpendSealService, store: SpendSe
     requireScope(principal, "catalog:read"); const storefront = await store.merchantStorefront(merchantSlug, principal.userId);
     if (!storefront) return { isError: true, content: [{ type: "text", text: "Active merchant storefront not found." }] };
     return { structuredContent: { storefront }, content: [{ type: "text", text: `${storefront.merchant.displayName} has ${storefront.products.length} active product(s) available to AI buyers. Readiness: ${storefront.readiness.status}. Razorpay Test Mode: ${storefront.checkout.razorpayTestModeAvailable ? "available" : "not connected"}. Prices are authoritative and expressed in paise.` }] };
+  });
+
+  server.registerTool("start_price_negotiation", { title: "Start a bounded price negotiation", description: "Submit the authenticated buyer's first offer for one negotiation-enabled product. The private merchant minimum is never returned. At most three increasing buyer offers are allowed.", inputSchema: { productId: z.string().uuid(), buyerMaxTotalPaise: z.number().int().positive(), initialOfferPaise: z.number().int().positive(), idempotencyKey: z.string().min(8).max(120).optional() }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true } }, async (input) => {
+    requireScope(principal, "deals:create"); const deal = await service.deals.start({ buyerId: principal.userId, ...input });
+    const last = deal.rounds.at(-1); const message = last?.response === "counter" ? `The merchant agent countered at INR ${(last.merchantCounterPaise! / 100).toFixed(2)}. You may submit a higher offer that stays within the buyer's hard maximum.` : last?.response === "accepted" ? `Deal accepted at INR ${(deal.acceptedPricePaise! / 100).toFixed(2)}. Create the negotiated PurchasePermit for buyer approval.` : "NO_DEAL. No merchant floor was disclosed and no PurchasePermit or payment order was created.";
+    return { structuredContent: { deal }, content: [{ type: "text", text: message }] };
+  });
+
+  server.registerTool("counter_price_negotiation", { title: "Submit the next buyer offer", description: "Submit one strictly higher buyer offer in an active deal. The offer cannot exceed the buyer's original hard maximum.", inputSchema: { dealSessionId: z.string().uuid(), offerPaise: z.number().int().positive() }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true } }, async ({ dealSessionId, offerPaise }) => {
+    requireScope(principal, "deals:create"); const deal = await service.deals.counter({ buyerId: principal.userId, dealSessionId, offerPaise }); const last = deal.rounds.at(-1);
+    const message = last?.response === "counter" ? `Merchant counter: INR ${(last.merchantCounterPaise! / 100).toFixed(2)}.` : last?.response === "accepted" ? `Deal accepted at INR ${(deal.acceptedPricePaise! / 100).toFixed(2)}.` : "NO_DEAL. No final counter is returned, and no PurchasePermit or Razorpay order exists.";
+    return { structuredContent: { deal }, content: [{ type: "text", text: message }] };
+  });
+
+  server.registerTool("get_price_negotiation", { title: "Get price negotiation", description: "Read the authenticated buyer's visible offers, merchant counters, status and accepted terms. The private merchant minimum is never exposed.", inputSchema: { dealSessionId: z.string().uuid() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ dealSessionId }) => {
+    requireScope(principal, "deals:read"); const deal = await service.deals.get(principal.userId, dealSessionId);
+    return { structuredContent: { deal }, content: [{ type: "text", text: `Deal status: ${deal.status}. Buyer offers used: ${deal.roundCount} of 3.` }] };
+  });
+
+  server.registerTool("create_negotiated_purchase_permit", { title: "Seal an accepted deal", description: "Turn one accepted, unused deal into a single-use PurchasePermit. This does not approve or pay; the buyer must use a passkey.", inputSchema: { dealSessionId: z.string().uuid() }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true } }, async ({ dealSessionId }) => {
+    requireScope(principal, "intents:create"); const created = await service.deals.createPermit({ buyerId: principal.userId, dealSessionId }); const approvalUrl = created.approvalToken ? `${service.config.publicBaseUrl}/approve/${created.intent.id}?token=${encodeURIComponent(created.approvalToken)}` : null;
+    return { structuredContent: { intent: created.intent, approvalUrl }, content: [{ type: "text", text: approvalUrl ? `Negotiated PurchasePermit ${created.intent.id} awaits the buyer's passkey approval: ${approvalUrl}` : `Negotiated PurchasePermit ${created.intent.id} already exists. Its one-time approval link is not reissued.` }] };
   });
 
   server.registerTool("create_purchase_permit", { title: "Create a PurchasePermit", description: "Create a single-use, expiring purchase mandate for the authenticated buyer and one exact merchant product. This does not approve or pay.", inputSchema: { merchantId: z.string().uuid(), productId: z.string().uuid(), maxTotalPaise: z.number().int().positive().optional(), priceChangePolicy: z.enum(PRICE_CHANGE_POLICIES).optional(), requireRefundable: z.boolean().optional(), minimumRefundWindowDays: z.number().int().min(0).max(90).nullable().optional(), expiresInMinutes: z.number().int().min(1).max(30).optional() }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false } }, async (input) => {
