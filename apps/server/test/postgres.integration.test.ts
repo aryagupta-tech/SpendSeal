@@ -69,13 +69,16 @@ describe("PostgreSQL tenant and payment invariants", () => {
     expect(resumed.id).toBe(first.id); expect(resumed.rounds).toHaveLength(1); expect(resumed.buyerMaxTotalPaise).toBe(4_500); expect(resumed.rounds[0]?.buyerOfferPaise).toBe(4_000);
     await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 3_999 })).rejects.toMatchObject({ code: "NEGOTIATION_LIMIT_REACHED" });
     await expect(service.deals.counter({ buyerId: buyer.id, dealSessionId: first.id, offerPaise: 4_501 })).rejects.toMatchObject({ code: "OFFER_ABOVE_BUYER_LIMIT" });
+    expect((await service.deals.getActive(buyer.id, product.id)).id).toBe(first.id);
+    const continuedWithoutInternalId = await service.deals.counterActive({ buyerId: buyer.id, productId: product.id, offerPaise: 4_300 });
+    expect(continuedWithoutInternalId).toMatchObject({ id: first.id, roundCount: 2, buyerMaxTotalPaise: 4_500 });
   });
 
   it("seals an accepted deal into one passkey-gated payment at the negotiated amount", async () => {
     const owner = await user("seal-owner"); const buyer = await user("seal-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "seal-shop", displayName: "Seal Shop" }); await service.configurePayments(merchant.id, { adapter: "mock" });
     const product = await store.createProduct(owner.id, merchant.id, { sku: "SEAL-1", name: "Negotiated Wax", description: "Negotiable product", pricePaise: 4_995, refundable: false, refundWindowDays: 0 }); await service.deals.savePolicy({ merchantId: merchant.id, productId: product.id, minimumPricePaise: 4_200, actorUserId: owner.id });
     let deal = await service.deals.start({ buyerId: buyer.id, productId: product.id, buyerMaxTotalPaise: 4_500, initialOfferPaise: 4_000, idempotencyKey: "seal-accepted-deal" }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_300 }); deal = await service.deals.counter({ buyerId: buyer.id, dealSessionId: deal.id, offerPaise: 4_450 });
-    const created = await service.deals.createPermit({ buyerId: buyer.id, dealSessionId: deal.id }); expect(created.intent.negotiatedDeal).toMatchObject({ publicUnitPricePaise: 4_995, negotiatedUnitPricePaise: 4_450, savingsPaise: 545 });
+    const created = await service.deals.createPermitForProduct({ buyerId: buyer.id, productId: product.id }); expect(created.intent.negotiatedDeal).toMatchObject({ publicUnitPricePaise: 4_995, negotiatedUnitPricePaise: 4_450, savingsPaise: 545 });
     const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, created.approvalToken!); await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: "cred_seal-buyer", counter: 1, deviceType: "singleDevice", backedUp: false });
     const checkout = await service.prepareCheckout(buyer.id, created.intent.id); expect(checkout.checkoutUrl).toBeTruthy(); const order = await store.getOrderByIntent(created.intent.id); expect(order?.amountPaise).toBe(4_450);
     const replay = await service.prepareCheckout(buyer.id, created.intent.id); expect(replay.decision.reasons).toContain("REPLAY_DETECTED"); expect((await pool.query("SELECT COUNT(*)::int AS count FROM payment_orders WHERE intent_lock_id=$1", [created.intent.id])).rows[0].count).toBe(1);

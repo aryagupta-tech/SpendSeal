@@ -32,7 +32,7 @@ Do these checks slowly before you press Record.
 6. Open **Merchant AI Sales Closer**.
 7. Confirm **Selling Plans Ski Wax - Special Selling Plans Ski Wax** has negotiation enabled and the private minimum is INR 42.
 8. Confirm the product's current public price is INR 49.95. If the page shows a rounded stale value, hard-refresh once.
-9. In ChatGPT, confirm the **SpendSeal Dealmaker** connection is enabled. The current demo endpoint is `https://spendseal.vercel.app/mcp-v3`.
+9. In ChatGPT, confirm the **SpendSeal Dealmaker** connection is enabled. The current demo endpoint is `https://spendseal.vercel.app/mcp-v4`. The buyer should never be asked for an internal deal-session ID; ChatGPT can continue the active deal from the product ID.
 10. Keep the existing successful deal audit and PurchasePermit audit open in background tabs. These are your safest network-failure backup.
 11. Close tabs that contain Shopify tokens, Razorpay keys, webhook secrets, database URLs or environment variables.
 12. Turn off desktop notifications. Zoom the browser to a readable level.

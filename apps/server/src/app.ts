@@ -165,7 +165,7 @@ export function createApp(config: Config, store: SpendSealStore) {
     ));
   }));
 
-  app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp-v3"], (_req, res) => res.json(oauth.protectedResourceMetadata()));
+  app.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp-v3", "/.well-known/oauth-protected-resource/mcp-v4"], (_req, res) => res.json(oauth.protectedResourceMetadata()));
   app.get(["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"], (_req, res) => res.json(oauth.authorizationServerMetadata()));
   app.get("/oauth/authorize", requireBrowserRedirect, asyncHandler(async (req, res) => { const validated = oauth.validateAuthorizationRequest(queryRecord(req)); const csrf = cookie(req, "agentrail_csrf") ?? ""; res.type("html").send(consentPage(validated, csrf, principal(res).user.displayName)); }));
   app.post("/oauth/authorize", express.urlencoded({ extended: false, limit: "32kb" }), requireBrowserRedirect, requireCsrf, asyncHandler(async (req, res) => { const validated = oauth.validateAuthorizationRequest(bodyRecord(req)); res.redirect(303, await oauth.authorize(principal(res).user.id, validated)); }));
@@ -175,10 +175,10 @@ export function createApp(config: Config, store: SpendSealStore) {
   // Keep the stable endpoint and a versioned discovery endpoint. ChatGPT can
   // cache a custom app's tool manifest by server URL, so the versioned alias
   // provides a clean schema refresh after adding new MCP actions.
-  app.post(["/mcp", "/mcp-v3"], limit(store, "mcp", 120, 60), asyncHandler(async (req, res) => { const token = bearer(req); const principal = token ? await oauth.authenticate(token) : null; if (!principal || principal.resource !== config.publicBaseUrl) { res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource", scope="${MCP_SCOPES.join(" ")}"`); res.status(401).json({ error: "invalid_token" }); return; } await handleMcpRequest(service, store, browserAgent, principal, req, res); }));
-  app.get(["/mcp", "/mcp-v3"], (_req, res) => res.status(405).json({ error: "Streamable HTTP accepts POST requests." }));
+  app.post(["/mcp", "/mcp-v3", "/mcp-v4"], limit(store, "mcp", 120, 60), asyncHandler(async (req, res) => { const token = bearer(req); const principal = token ? await oauth.authenticate(token) : null; if (!principal || principal.resource !== config.publicBaseUrl) { res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource", scope="${MCP_SCOPES.join(" ")}"`); res.status(401).json({ error: "invalid_token" }); return; } await handleMcpRequest(service, store, browserAgent, principal, req, res); }));
+  app.get(["/mcp", "/mcp-v3", "/mcp-v4"], (_req, res) => res.status(405).json({ error: "Streamable HTTP accepts POST requests." }));
 
-  const webDist = resolveWebDist(); app.use(express.static(webDist)); app.use((req, res, next) => { if (req.method === "GET" && !req.path.startsWith("/api/") && !["/mcp", "/mcp-v3"].includes(req.path) && !req.path.startsWith("/.well-known/") && !req.path.startsWith("/oauth/")) res.sendFile(path.join(webDist, "index.html"), (error) => error ? next() : undefined); else next(); });
+  const webDist = resolveWebDist(); app.use(express.static(webDist)); app.use((req, res, next) => { if (req.method === "GET" && !req.path.startsWith("/api/") && !["/mcp", "/mcp-v3", "/mcp-v4"].includes(req.path) && !req.path.startsWith("/.well-known/") && !req.path.startsWith("/oauth/")) res.sendFile(path.join(webDist, "index.html"), (error) => error ? next() : undefined); else next(); });
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (error instanceof z.ZodError) { res.status(400).json({ error: { code: "INVALID_INPUT", message: "Request validation failed.", details: error.flatten() } }); return; }
     if (error instanceof SpendSealError) { res.status(error.status).json({ error: { code: error.code, message: error.message } }); return; }

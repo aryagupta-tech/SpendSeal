@@ -313,7 +313,7 @@ Implemented MCP tools:
 
 The stable MCP URL is `https://spendseal.vercel.app/mcp`. If ChatGPT has cached
 an older custom-app tool schema during development, reconnect the app once using
-`https://spendseal.vercel.app/mcp-v3` to force fresh discovery of the deal tools.
+`https://spendseal.vercel.app/mcp-v4` to force fresh discovery of the deal tools. The v4 negotiation tools can continue and seal an active deal from its product ID, so the buyer never has to carry or provide an internal deal-session ID.
 | `create_purchase_permit` | `intents:create` | Creates a mandate for the OAuth buyer; buyer ID is never accepted as input |
 | `get_purchase_permit` | `intents:read` | Returns only the OAuth buyer’s mandate |
 | `prepare_checkout` | `checkout:prepare` | Runs policy and claims at most one Test Mode order |

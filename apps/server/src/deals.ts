@@ -96,6 +96,23 @@ export class PriceNegotiationService {
     return transaction(this.store.pool, async (client) => { await this.submitOffer(client, input.dealSessionId, input.buyerId, input.offerPaise); return this.get(input.buyerId, input.dealSessionId, client); });
   }
 
+  async counterActive(input: { buyerId: string; productId: string; offerPaise: number }): Promise<PriceNegotiation> {
+    return transaction(this.store.pool, async (client) => {
+      const dealSessionId = await this.activeDealId(input.buyerId, input.productId, client);
+      await this.submitOffer(client, dealSessionId, input.buyerId, input.offerPaise);
+      return this.get(input.buyerId, dealSessionId, client);
+    });
+  }
+
+  async getActive(buyerId: string, productId: string, db: Queryable = this.store.pool): Promise<PriceNegotiation> {
+    return this.get(buyerId, await this.activeDealId(buyerId, productId, db), db);
+  }
+
+  async createPermitForProduct(input: { buyerId: string; productId: string }): Promise<{ intent: PurchasePermit; approvalToken: string | null }> {
+    const dealSessionId = await this.activeDealId(input.buyerId, input.productId, this.store.pool);
+    return this.createPermit({ buyerId: input.buyerId, dealSessionId });
+  }
+
   async get(buyerId: string, dealSessionId: string, db: Queryable = this.store.pool): Promise<PriceNegotiation> {
     const result = await db.query("SELECT * FROM deal_sessions WHERE id=$1 AND buyer_id=$2", [dealSessionId, buyerId]);
     if (!result.rows[0]) throw new DealError(404, "DEAL_NOT_FOUND", "Price negotiation not found for this buyer.");
@@ -183,6 +200,16 @@ export class PriceNegotiationService {
     const eventType = outcome.response === "counter" ? "MERCHANT_COUNTERED" : outcome.response === "accepted" ? "DEAL_ACCEPTED" : "DEAL_REJECTED";
     await this.store.appendAudit({ scopeType: "deal", scopeId: deal.id, merchantId: deal.merchant_id, purchasePermitId: null, eventType, actor: "merchant_agent", reasonCode: outcome.response === "accepted" ? "ALLOWED" : outcome.response === "rejected" ? "NO_DEAL" : null, payload: outcome.response === "counter" ? { round, merchantCounterPaise: outcome.counterPaise } : outcome.response === "accepted" ? { round, acceptedPricePaise: offerPaise, publicPricePaise: deal.public_price_paise, buyerAuthorityPassed: true, savingsPaise: deal.public_price_paise - offerPaise, acceptedOfferSnapshotHash: snapshotHash } : { round, result: "NO_DEAL", finalCounterWithheld: true } }, client);
     if (outcome.response !== "counter") await this.store.recordAiCommerceEvent({ merchantId: deal.merchant_id, productId: deal.product_id, eventType: outcome.response === "accepted" ? "DEAL_ACCEPTED" : "DEAL_REJECTED", source: "merchant_agent", deduplicationKey: `deal:${outcome.response}:${deal.id}` }, client);
+  }
+
+  private async activeDealId(buyerId: string, productId: string, db: Queryable): Promise<string> {
+    const result = await db.query(`SELECT id FROM deal_sessions
+      WHERE buyer_id=$1 AND product_id=$2
+        AND status IN ('negotiating','accepted','permit_created')
+        AND expires_at>now()
+      ORDER BY created_at DESC LIMIT 1`, [buyerId, productId]);
+    if (!result.rows[0]) throw new DealError(404, "DEAL_NOT_FOUND", "No active price negotiation was found for this buyer and product. Start the first offer before continuing.");
+    return String(result.rows[0].id);
   }
 
   private async revalidationEvidence(client: Queryable, deal: any): Promise<{ product: Product; policy: any; floor: number }> {
