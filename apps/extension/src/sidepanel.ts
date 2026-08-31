@@ -97,7 +97,7 @@ async function act(message: any, done: (value: any) => unknown) { const result =
 function send(message: any): Promise<any> { return chrome.runtime.sendMessage(message); }
 function show(message: string, error = false) { notice.hidden = false; notice.className = error ? "task danger" : "task success"; notice.textContent = message; }
 function byId(id: string) { return document.getElementById(id)!; }
-function rupees(paise: number) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(paise / 100); }
+function rupees(paise: number) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: Math.abs(paise) % 100 === 0 ? 0 : 2, maximumFractionDigits: 2 }).format(paise / 100); }
 function siteName(site: string) { return site === "amazon_in" ? "Amazon India" : site === "flipkart_in" ? "Flipkart" : site === "openai_api" ? "OpenAI API billing" : "Permitted website"; }
 function pretty(value: string) { return value.replaceAll("_", " "); }
 function escapeHtml(value: string) { return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!); }

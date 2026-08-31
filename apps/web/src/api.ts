@@ -15,6 +15,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return body as T;
 }
 
-export const money = (paise: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(paise / 100);
+export const money = (paise: number) => new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  minimumFractionDigits: Math.abs(paise) % 100 === 0 ? 0 : 2,
+  maximumFractionDigits: 2,
+}).format(paise / 100);
 export const shortId = (value: string) => `${value.slice(0, 8)}…${value.slice(-4)}`;
 export const dateTime = (value: string) => new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
