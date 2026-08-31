@@ -9,7 +9,7 @@ import { SpendSealStore } from "./store.js";
 import { BrowserAgentService } from "./browser-agent.js";
 
 export async function handleMcpRequest(service: SpendSealService, store: SpendSealStore, browserAgent: BrowserAgentService, principal: OAuthPrincipal, req: Request, res: Response): Promise<void> {
-  const server = new McpServer({ name: "spendseal", version: "2.0.0" }, { instructions: "SpendSeal is an authorization control plane for AI purchases. ChatGPT may create tasks, compare products, and queue non-sensitive visible browser actions. It can never confirm the final product, approve a Purchase Seal, access credentials, or invoke the protected final submit action. The buyer's local extension operates one explicitly permitted website at a time." });
+  const server = new McpServer({ name: "spendseal", version: "2.1.0" }, { instructions: "SpendSeal is an AI Checkout Gateway for merchants. It publishes authoritative, agent-readable Shopify storefronts and turns a buyer request into one bounded PurchasePermit executed through Razorpay Test Mode. ChatGPT may discover and explain products and create a permit, but it cannot approve a product, approve a PurchasePermit, raise a spending limit, bypass the buyer's passkey, or invoke an unprotected payment." });
 
   server.registerTool("list_merchants", { title: "Discover SpendSeal merchants", description: "Find active merchants that publish authoritative catalogs through SpendSeal.", inputSchema: { query: z.string().max(100).optional(), cursor: z.string().uuid().optional() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ query, cursor }) => {
     requireScope(principal, "catalog:read"); const result = await store.listMerchants({ query, cursor, limit: 50 });
@@ -17,8 +17,16 @@ export async function handleMcpRequest(service: SpendSealService, store: SpendSe
   });
 
   server.registerTool("list_products", { title: "List merchant products", description: "Read current products, prices, availability, and merchant-stated refund terms from one authoritative merchant catalog.", inputSchema: { merchantId: z.string().uuid(), query: z.string().max(100).optional(), cursor: z.string().uuid().optional() }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ merchantId, query, cursor }) => {
-    requireScope(principal, "catalog:read"); const result = await store.listProducts(merchantId, query, 50, cursor);
+    requireScope(principal, "catalog:read"); const merchant = await store.getMerchant(merchantId);
+    if (!merchant?.status || merchant.status !== "active") return { isError: true, content: [{ type: "text", text: "Active merchant not found." }] };
+    const result = await store.listProducts(merchantId, query, 50, cursor); await store.recordCatalogDiscovery(merchantId, principal.userId, result.products.length, "product_list", query);
     return { structuredContent: result, content: [{ type: "text", text: result.products.length ? `Found ${result.products.length} authoritative product(s). Prices are in paise.` : "No matching active products were found." }] };
+  });
+
+  server.registerTool("get_merchant_storefront", { title: "Open an AI-ready merchant storefront", description: "Read one merchant's active authoritative products, prices, refund terms, checkout capability, Razorpay Test Mode availability, and AI-sales readiness in one response.", inputSchema: { merchantSlug: z.string().min(2).max(60).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/) }, annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false } }, async ({ merchantSlug }) => {
+    requireScope(principal, "catalog:read"); const storefront = await store.merchantStorefront(merchantSlug, principal.userId);
+    if (!storefront) return { isError: true, content: [{ type: "text", text: "Active merchant storefront not found." }] };
+    return { structuredContent: { storefront }, content: [{ type: "text", text: `${storefront.merchant.displayName} has ${storefront.products.length} active product(s) available to AI buyers. Readiness: ${storefront.readiness.status}. Razorpay Test Mode: ${storefront.checkout.razorpayTestModeAvailable ? "available" : "not connected"}. Prices are authoritative and expressed in paise.` }] };
   });
 
   server.registerTool("create_purchase_permit", { title: "Create a PurchasePermit", description: "Create a single-use, expiring purchase mandate for the authenticated buyer and one exact merchant product. This does not approve or pay.", inputSchema: { merchantId: z.string().uuid(), productId: z.string().uuid(), maxTotalPaise: z.number().int().positive().optional(), priceChangePolicy: z.enum(PRICE_CHANGE_POLICIES).optional(), requireRefundable: z.boolean().optional(), minimumRefundWindowDays: z.number().int().min(0).max(90).nullable().optional(), expiresInMinutes: z.number().int().min(1).max(30).optional() }, annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false } }, async (input) => {

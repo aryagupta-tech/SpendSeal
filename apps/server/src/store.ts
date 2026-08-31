@@ -5,8 +5,13 @@ import {
   sha256,
   type AuditActor,
   type AuditEvent,
+  type AiCommerceEventType,
+  type AiCommerceSource,
+  type MerchantAiSalesSummary,
   type PurchasePermit,
   type Merchant,
+  type MerchantReadiness,
+  type MerchantStorefront,
   type PaymentOrder,
   type Product,
   type ReasonCode,
@@ -25,6 +30,7 @@ export type CatalogConnection = { merchantId: string; provider: "shopify"; shopD
 export type MerchantRole = "owner" | "admin" | "catalog_manager" | "auditor";
 export type MerchantListing = Merchant & { role?: MerchantRole };
 export type ShopifyProductReference = { externalId: string; externalUpdatedAt: string | null };
+export type AiCommerceEventInput = { merchantId: string; eventType: AiCommerceEventType; source: AiCommerceSource; deduplicationKey: string; productId?: string | null; purchasePermitId?: string | null; paymentOrderId?: string | null; metricValue?: number };
 
 export class SpendSealStore {
   constructor(readonly pool: Pool) {}
@@ -125,6 +131,61 @@ export class SpendSealStore {
   }
 
   async getMerchant(id: string): Promise<Merchant | null> { const result = await this.pool.query("SELECT * FROM merchants WHERE id=$1", [id]); return result.rows[0] ? mapMerchant(result.rows[0]) : null; }
+
+  async getMerchantBySlug(slug: string): Promise<Merchant | null> {
+    const result = await this.pool.query("SELECT * FROM merchants WHERE lower(slug)=lower($1) AND status='active'", [slug]);
+    return result.rows[0] ? mapMerchant(result.rows[0]) : null;
+  }
+
+  async recordAiCommerceEvent(input: AiCommerceEventInput, db: Queryable = this.pool): Promise<boolean> {
+    const result = await db.query(`INSERT INTO merchant_ai_commerce_events(id,merchant_id,product_id,purchase_permit_id,payment_order_id,event_type,source,metric_value,deduplication_key)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(merchant_id,deduplication_key) DO NOTHING`, [randomUUID(), input.merchantId, input.productId ?? null, input.purchasePermitId ?? null, input.paymentOrderId ?? null, input.eventType, input.source, input.metricValue ?? 1, input.deduplicationKey]);
+    return Boolean(result.rowCount);
+  }
+
+  async recordCatalogDiscovery(merchantId: string, buyerId: string, productCount: number, channel: "storefront" | "product_list", query?: string): Promise<void> {
+    const day = new Date().toISOString().slice(0, 10); const buyerFingerprint = sha256(buyerId).slice(0, 20); const queryFingerprint = sha256(query?.trim().toLowerCase() || "all").slice(0, 16);
+    const key = `${channel}:${buyerFingerprint}:${queryFingerprint}:${day}`;
+    await this.recordAiCommerceEvent({ merchantId, eventType: "CATALOG_DISCOVERED", source: "chatgpt_mcp", deduplicationKey: `catalog:${key}` });
+    await this.recordAiCommerceEvent({ merchantId, eventType: "PRODUCTS_PRESENTED", source: "chatgpt_mcp", deduplicationKey: `products:${key}`, metricValue: productCount });
+  }
+
+  async merchantReadiness(merchantId: string): Promise<MerchantReadiness> {
+    const merchant = await this.getMerchant(merchantId); if (!merchant) throw new Error("MERCHANT_NOT_FOUND");
+    const [productsResult, connection, payment, webhookResult, paidResult] = await Promise.all([
+      this.pool.query("SELECT COUNT(*)::int AS count FROM products WHERE merchant_id=$1 AND active=true", [merchantId]),
+      this.catalogConnection(merchantId), this.paymentConfig(merchantId),
+      this.pool.query("SELECT COUNT(*)::int AS count FROM webhook_events WHERE merchant_id=$1", [merchantId]),
+      this.pool.query(`SELECT COUNT(*)::int AS count FROM payment_orders po JOIN merchant_payment_configurations pc ON pc.merchant_id=po.merchant_id AND pc.version=po.payment_config_version WHERE po.merchant_id=$1 AND po.status='paid' AND pc.adapter='razorpay'`, [merchantId]),
+    ]);
+    const productsAvailable = Number(productsResult.rows[0]?.count ?? 0); const shopifyConnected = connection?.provider === "shopify" && connection.status === "active";
+    const razorpayTestModeConnected = payment?.adapter === "razorpay" && Boolean(payment.keyId && payment.keySecretCiphertext); const webhookConfigured = razorpayTestModeConnected && Boolean(payment?.webhookSecretCiphertext);
+    const webhookStatus: MerchantReadiness["webhookStatus"] = Number(webhookResult.rows[0]?.count ?? 0) > 0 ? "verified" : webhookConfigured ? "configured_unverified" : "not_configured";
+    const transactable = productsAvailable > 0 && shopifyConnected && razorpayTestModeConnected && webhookConfigured;
+    const status: MerchantReadiness["status"] = transactable && Number(paidResult.rows[0]?.count ?? 0) > 0 ? "payment_verified" : transactable ? "ai_transactable" : productsAvailable > 0 ? "catalog_ready" : "not_ready";
+    return { status, merchantId, merchantSlug: merchant.slug, merchantName: merchant.displayName, shopifyConnected, razorpayTestModeConnected, productsAvailable, chatGptConnectionAvailable: true, webhookStatus, samplePrompt: `Open SpendSeal, show me products from ${merchant.displayName} below INR 1,000, and prepare a protected purchase.`, evidenceAssurance: razorpayTestModeConnected ? "provider_verified" : "merchant_managed" };
+  }
+
+  async merchantStorefront(merchantSlug: string, buyerId: string): Promise<MerchantStorefront | null> {
+    const merchant = await this.getMerchantBySlug(merchantSlug); if (!merchant) return null;
+    const [{ products }, readiness] = await Promise.all([this.listProducts(merchant.id, undefined, 100), this.merchantReadiness(merchant.id)]);
+    await this.recordCatalogDiscovery(merchant.id, buyerId, products.length, "storefront");
+    return { merchant: { id: merchant.id, slug: merchant.slug, displayName: merchant.displayName, status: merchant.status }, products, supportedCurrency: "INR", refundTermsAuthority: "merchant_stated", checkout: { purchasePermitAvailable: products.length > 0, buyerPasskeyRequired: true, razorpayTestModeAvailable: readiness.razorpayTestModeConnected, evidenceAssurance: readiness.evidenceAssurance, livePaymentMode: "test" }, readiness };
+  }
+
+  async merchantAiSalesSummary(merchantId: string): Promise<MerchantAiSalesSummary> {
+    const [eventsResult, paymentsResult, blockedResult, topResult] = await Promise.all([
+      this.pool.query(`WITH ai_permits AS (SELECT purchase_permit_id FROM merchant_ai_commerce_events WHERE merchant_id=$1 AND event_type='PURCHASE_PERMIT_CREATED' AND source='chatgpt_mcp') SELECT e.event_type,COUNT(*)::int AS count,COALESCE(SUM(e.metric_value),0)::int AS value FROM merchant_ai_commerce_events e WHERE e.merchant_id=$1 AND (e.event_type IN ('CATALOG_DISCOVERED','PRODUCTS_PRESENTED') OR e.purchase_permit_id IN (SELECT purchase_permit_id FROM ai_permits)) GROUP BY e.event_type`, [merchantId]),
+      this.pool.query(`SELECT COUNT(*) FILTER(WHERE po.provider_order_id IS NOT NULL)::int AS orders_created,COUNT(*) FILTER(WHERE po.status='paid')::int AS payments_verified,COALESCE(SUM(po.amount_paise) FILTER(WHERE po.status='paid'),0)::bigint AS test_gmv FROM payment_orders po JOIN merchant_payment_configurations pc ON pc.merchant_id=po.merchant_id AND pc.version=po.payment_config_version JOIN merchant_ai_commerce_events origin ON origin.merchant_id=po.merchant_id AND origin.purchase_permit_id=po.intent_lock_id AND origin.event_type='PURCHASE_PERMIT_CREATED' AND origin.source='chatgpt_mcp' WHERE po.merchant_id=$1 AND pc.adapter='razorpay'`, [merchantId]),
+      this.pool.query(`SELECT COUNT(*)::int AS count FROM merchant_ai_commerce_events e JOIN merchant_ai_commerce_events origin ON origin.merchant_id=e.merchant_id AND origin.purchase_permit_id=e.purchase_permit_id AND origin.event_type='PURCHASE_PERMIT_CREATED' AND origin.source='chatgpt_mcp' WHERE e.merchant_id=$1 AND e.event_type IN ('POLICY_DENIED','REPLAY_BLOCKED')`, [merchantId]),
+      this.pool.query(`SELECT p.id AS product_id,p.name,COUNT(*)::int AS selections FROM merchant_ai_commerce_events e JOIN products p ON p.id=e.product_id AND p.merchant_id=e.merchant_id WHERE e.merchant_id=$1 AND e.event_type='PURCHASE_PERMIT_CREATED' AND e.source='chatgpt_mcp' GROUP BY p.id,p.name ORDER BY selections DESC,p.name LIMIT 5`, [merchantId]),
+    ]);
+    const counts = new Map<string, { count: number; value: number }>(eventsResult.rows.map((row) => [row.event_type, { count: Number(row.count), value: Number(row.value) }]));
+    const eventCount = (type: string) => counts.get(type)?.count ?? 0; const eventValue = (type: string) => counts.get(type)?.value ?? 0;
+    const purchasePermitsCreated = eventCount("PURCHASE_PERMIT_CREATED"); const passkeyApprovals = eventCount("PASSKEY_APPROVED"); const paymentsVerified = Number(paymentsResult.rows[0]?.payments_verified ?? 0);
+    const rate = (numerator: number, denominator: number) => denominator ? Math.round(numerator / denominator * 1000) / 10 : 0;
+    return { catalogDiscoveries: eventCount("CATALOG_DISCOVERED"), productsShown: eventValue("PRODUCTS_PRESENTED"), purchasePermitsCreated, passkeyApprovals, policyAllowedCheckouts: eventCount("POLICY_ALLOWED"), policyDenials: eventCount("POLICY_DENIED"), razorpayTestOrdersCreated: Number(paymentsResult.rows[0]?.orders_created ?? 0), razorpayTestPaymentsVerified: paymentsVerified, testGmvPaise: Number(paymentsResult.rows[0]?.test_gmv ?? 0), safelyStoppedPurchases: Number(blockedResult.rows[0]?.count ?? 0), permitToApprovalRate: rate(passkeyApprovals, purchasePermitsCreated), approvalToPaymentRate: rate(paymentsVerified, passkeyApprovals), topProducts: topResult.rows.map((row) => ({ productId: row.product_id, name: row.name, selections: Number(row.selections) })) };
+  }
 
   async catalogConnection(merchantId: string): Promise<CatalogConnection | null> {
     const result = await this.pool.query("SELECT * FROM merchant_catalog_connections WHERE merchant_id=$1", [merchantId]);
@@ -327,13 +388,14 @@ export class SpendSealStore {
     return result.rows;
   }
 
-  async createIntent(buyerId: string, product: Product, input: { maxTotalPaise: number; priceChangePolicy: string; requireRefundable: boolean; minimumRefundWindowDays: number | null; expiresAt: string }): Promise<{ intent: PurchasePermit; approvalToken: string }> {
+  async createIntent(buyerId: string, product: Product, input: { maxTotalPaise: number; priceChangePolicy: string; requireRefundable: boolean; minimumRefundWindowDays: number | null; expiresAt: string }, source: "chatgpt_mcp" | "buyer_web" = "chatgpt_mcp"): Promise<{ intent: PurchasePermit; approvalToken: string }> {
     return transaction(this.pool, async (client) => {
       const id = randomUUID(); const approvalToken = randomBytes(32).toString("base64url"); const createdAt = new Date().toISOString();
       await client.query(`INSERT INTO intent_locks(id,buyer_id,merchant_id,product_id,product_revision_id,product_snapshot_hash,locked_unit_price_paise,max_total_paise,price_change_policy,require_refundable,minimum_refund_window_days,expires_at,idempotency_key,approval_token_hash,status,created_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'pending_confirmation',$15)`, [id, buyerId, product.merchantId, product.id, product.revisionId, product.snapshotHash, product.pricePaise, input.maxTotalPaise, input.priceChangePolicy, input.requireRefundable, input.minimumRefundWindowDays, input.expiresAt, `intent_${randomUUID()}`, sha256(approvalToken), createdAt]);
       const intent = await this.getIntent(id, buyerId, client);
-      await this.appendAudit({ scopeType: "intent", scopeId: id, merchantId: product.merchantId, purchasePermitId: id, eventType: "PURCHASE_PERMIT_CREATED", actor: "chatgpt", reasonCode: null, payload: { intent, authorizedProduct: product } }, client);
+      await this.appendAudit({ scopeType: "intent", scopeId: id, merchantId: product.merchantId, purchasePermitId: id, eventType: "PURCHASE_PERMIT_CREATED", actor: source === "buyer_web" ? "buyer" : "chatgpt", reasonCode: null, payload: { intent, authorizedProduct: product } }, client);
+      await this.recordAiCommerceEvent({ merchantId: product.merchantId, productId: product.id, purchasePermitId: id, eventType: "PURCHASE_PERMIT_CREATED", source, deduplicationKey: `permit:${id}` }, client);
       return { intent: intent!, approvalToken };
     });
   }
@@ -375,6 +437,7 @@ export class SpendSealStore {
       await client.query("UPDATE passkey_credentials SET counter=$2 WHERE credential_id=$1", [input.credentialId, input.counter]);
       await this.appendAudit({ scopeType: "intent", scopeId: input.purchasePermitId, merchantId: result.rows[0].merchant_id, purchasePermitId: input.purchasePermitId, eventType: "PASSKEY_VERIFIED", actor: "buyer", reasonCode: null, payload: { credentialIdHash: sha256(input.credentialId), deviceType: input.deviceType, backedUp: input.backedUp, userVerified: true } }, client);
       await this.appendAudit({ scopeType: "intent", scopeId: input.purchasePermitId, merchantId: result.rows[0].merchant_id, purchasePermitId: input.purchasePermitId, eventType: "HUMAN_CONFIRMATION_RECORDED", actor: "buyer", reasonCode: null, payload: { method: "passkey", buyerId: input.buyerId } }, client);
+      await this.recordAiCommerceEvent({ merchantId: result.rows[0].merchant_id, productId: result.rows[0].product_id, purchasePermitId: input.purchasePermitId, eventType: "PASSKEY_APPROVED", source: "buyer_web", deduplicationKey: `approval:${input.purchasePermitId}` }, client);
       return mapIntent(result.rows[0]);
     });
   }
@@ -388,6 +451,7 @@ export class SpendSealStore {
       const product = await this.getProduct(intent.merchantId, intent.productId, client);
       const decision = evaluate(intent, product);
       await this.appendAudit({ scopeType: "intent", scopeId: intent.id, merchantId: intent.merchantId, purchasePermitId: intent.id, eventType: decision.allowed ? "POLICY_ALLOWED" : "POLICY_DENIED", actor: "policy_engine", reasonCode: decision.allowed ? "ALLOWED" : decision.reasons[0]!, payload: { decision, authoritativeProduct: product, source: "merchant_managed_catalog" } }, client);
+      await this.recordAiCommerceEvent({ merchantId: intent.merchantId, productId: intent.productId, purchasePermitId: intent.id, eventType: decision.allowed ? "POLICY_ALLOWED" : "POLICY_DENIED", source: "policy_engine", deduplicationKey: `policy:${decision.allowed ? "allowed" : "denied"}:${intent.id}` }, client);
       if (!decision.allowed || !product) {
         const status = decision.reasons.includes("EXPIRED") ? "expired" : "denied";
         const updated = await client.query("UPDATE intent_locks SET status=$2 WHERE id=$1 RETURNING *", [intent.id, status]);
@@ -408,6 +472,7 @@ export class SpendSealStore {
       const order = mapOrder(result.rows[0]);
       await client.query("UPDATE intent_locks SET status='checkout_ready' WHERE id=$1", [order.purchasePermitId]);
       await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_ORDER_CREATED", actor: adapter === "mock" ? "mock_adapter" : "razorpay", reasonCode: null, payload: { adapter, orderId, providerOrderId, amountPaise: order.amountPaise, observedProductVersion: order.observedProductVersion, observedProductRevisionId: order.observedProductRevisionId, observedSnapshotHash: order.observedProductSnapshotHash, paymentConfigVersion: order.paymentConfigVersion } }, client);
+      await this.recordAiCommerceEvent({ merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, paymentOrderId: order.id, eventType: "PAYMENT_ORDER_CREATED", source: adapter === "mock" ? "mock_adapter" : "razorpay", deduplicationKey: `order:${order.id}` }, client);
       return order;
     });
   }
@@ -425,6 +490,7 @@ export class SpendSealStore {
       const result = await client.query("UPDATE payment_orders SET status='paid',payment_id=COALESCE(payment_id,$2) WHERE id=$1 RETURNING *", [orderId, paymentId]);
       const order = mapOrder(result.rows[0]); await client.query("UPDATE intent_locks SET status='paid' WHERE id=$1", [order.purchasePermitId]);
       await this.appendAudit({ scopeType: "intent", scopeId: order.purchasePermitId, merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, eventType: "PAYMENT_VERIFIED", actor: adapter === "mock" ? "mock_adapter" : "razorpay", reasonCode: null, payload: { adapter, providerOrderId: order.providerOrderId, paymentId } }, client);
+      await this.recordAiCommerceEvent({ merchantId: order.merchantId, purchasePermitId: order.purchasePermitId, paymentOrderId: order.id, eventType: "PAYMENT_VERIFIED", source: adapter === "mock" ? "mock_adapter" : "razorpay", deduplicationKey: `payment:${order.id}` }, client);
       return order;
     });
   }

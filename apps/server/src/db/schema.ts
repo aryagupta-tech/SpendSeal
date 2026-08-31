@@ -87,6 +87,13 @@ export const webhookEvents = pgTable("webhook_events", {
   merchantId: uuid("merchant_id").notNull().references(() => merchants.id), eventId: text("event_id").notNull(), eventType: text("event_type").notNull(), createdAt: createdAt(),
 }, (table) => [primaryKey({ columns: [table.merchantId, table.eventId] })]);
 
+export const merchantAiCommerceEvents = pgTable("merchant_ai_commerce_events", {
+  id: uuid("id").primaryKey(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), productId: uuid("product_id").references(() => products.id),
+  purchasePermitId: uuid("purchase_permit_id").references(() => purchasePermits.id), paymentOrderId: uuid("payment_order_id").references(() => paymentOrders.id),
+  eventType: text("event_type").notNull(), source: text("source").notNull(), metricValue: integer("metric_value").notNull().default(1),
+  deduplicationKey: text("deduplication_key").notNull(), createdAt: createdAt(),
+}, (table) => [uniqueIndex("merchant_ai_events_dedupe_unique").on(table.merchantId, table.deduplicationKey), index("merchant_ai_events_funnel_idx").on(table.merchantId, table.eventType, table.createdAt), index("merchant_ai_events_product_idx").on(table.merchantId, table.productId)]);
+
 export const auditChainHeads = pgTable("audit_chain_heads", {
   scopeType: text("scope_type").notNull(), scopeId: uuid("scope_id").notNull(), merchantId: uuid("merchant_id").notNull().references(() => merchants.id), sequence: integer("sequence").notNull().default(0), hash: text("hash").notNull().default("GENESIS"),
 }, (table) => [primaryKey({ columns: [table.scopeType, table.scopeId] })]);

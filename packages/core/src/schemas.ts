@@ -12,6 +12,12 @@ export const SHOPPING_TASK_STATUSES = [
   "checkout_configuring", "payment_choice_required", "payment_action_required",
   "approved", "policy_check", "prepared", "submitting", "completed", "user_action_required", "denied", "reconciliation_required", "failed", "expired",
 ] as const;
+export const MERCHANT_READINESS_STATUSES = ["not_ready", "catalog_ready", "ai_transactable", "payment_verified"] as const;
+export const AI_COMMERCE_EVENT_TYPES = [
+  "CATALOG_DISCOVERED", "PRODUCTS_PRESENTED", "PURCHASE_PERMIT_CREATED", "PASSKEY_APPROVED", "POLICY_ALLOWED", "POLICY_DENIED",
+  "PAYMENT_ORDER_CREATED", "PAYMENT_VERIFIED", "REPLAY_BLOCKED",
+] as const;
+export const AI_COMMERCE_SOURCES = ["chatgpt_mcp", "buyer_web", "policy_engine", "razorpay", "mock_adapter", "system"] as const;
 
 export const PriceChangePolicySchema = z.enum(PRICE_CHANGE_POLICIES);
 export type PriceChangePolicy = z.infer<typeof PriceChangePolicySchema>;
@@ -37,6 +43,40 @@ export const ProductSchema = z.object({
   refundTermsAuthority: z.literal("merchant_stated"), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
 });
 export type Product = z.infer<typeof ProductSchema>;
+
+export const MerchantReadinessStatusSchema = z.enum(MERCHANT_READINESS_STATUSES);
+export type MerchantReadinessStatus = z.infer<typeof MerchantReadinessStatusSchema>;
+
+export const MerchantReadinessSchema = z.object({
+  status: MerchantReadinessStatusSchema,
+  merchantId: z.string().uuid(), merchantSlug: z.string(), merchantName: z.string(),
+  shopifyConnected: z.boolean(), razorpayTestModeConnected: z.boolean(), productsAvailable: z.number().int().nonnegative(),
+  chatGptConnectionAvailable: z.literal(true), webhookStatus: z.enum(["not_configured", "configured_unverified", "verified"]),
+  samplePrompt: z.string(), evidenceAssurance: z.enum(["merchant_managed", "provider_verified"]),
+});
+export type MerchantReadiness = z.infer<typeof MerchantReadinessSchema>;
+
+export const MerchantStorefrontSchema = z.object({
+  merchant: MerchantSchema.pick({ id: true, slug: true, displayName: true, status: true }),
+  products: z.array(ProductSchema), supportedCurrency: z.literal("INR"), refundTermsAuthority: z.literal("merchant_stated"),
+  checkout: z.object({ purchasePermitAvailable: z.boolean(), buyerPasskeyRequired: z.literal(true), razorpayTestModeAvailable: z.boolean(), evidenceAssurance: z.enum(["merchant_managed", "provider_verified"]), livePaymentMode: z.literal("test") }),
+  readiness: MerchantReadinessSchema,
+});
+export type MerchantStorefront = z.infer<typeof MerchantStorefrontSchema>;
+
+export const MerchantAiSalesSummarySchema = z.object({
+  catalogDiscoveries: z.number().int().nonnegative(), productsShown: z.number().int().nonnegative(), purchasePermitsCreated: z.number().int().nonnegative(),
+  passkeyApprovals: z.number().int().nonnegative(), policyAllowedCheckouts: z.number().int().nonnegative(), policyDenials: z.number().int().nonnegative(),
+  razorpayTestOrdersCreated: z.number().int().nonnegative(), razorpayTestPaymentsVerified: z.number().int().nonnegative(), testGmvPaise: z.number().int().nonnegative(),
+  safelyStoppedPurchases: z.number().int().nonnegative(), permitToApprovalRate: z.number().min(0).max(100), approvalToPaymentRate: z.number().min(0).max(100),
+  topProducts: z.array(z.object({ productId: z.string().uuid(), name: z.string(), selections: z.number().int().positive() })),
+});
+export type MerchantAiSalesSummary = z.infer<typeof MerchantAiSalesSummarySchema>;
+
+export const AiCommerceEventTypeSchema = z.enum(AI_COMMERCE_EVENT_TYPES);
+export type AiCommerceEventType = z.infer<typeof AiCommerceEventTypeSchema>;
+export const AiCommerceSourceSchema = z.enum(AI_COMMERCE_SOURCES);
+export type AiCommerceSource = z.infer<typeof AiCommerceSourceSchema>;
 
 export const CreateIntentInputSchema = z.object({
   merchantId: z.string().uuid(), productId: z.string().uuid(), maxTotalPaise: z.number().int().positive().optional(),

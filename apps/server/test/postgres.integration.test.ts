@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
-import { CreateWebPurchaseTaskInputSchema, MCP_SCOPES } from "@spendseal/core";
+import { CreateWebPurchaseTaskInputSchema, evaluatePurchasePermit, MCP_SCOPES } from "@spendseal/core";
 import { createDatabase, runMigrations } from "../src/db/client.js";
 import { loadConfig } from "../src/config.js";
 import { OAuthService } from "../src/oauth.js";
@@ -22,7 +22,7 @@ beforeAll(async () => {
 }, 30_000);
 
 beforeEach(async () => {
-  await pool.query(`TRUNCATE TABLE rate_limits,oauth_tokens,oauth_authorization_codes,audit_events,audit_chain_heads,webhook_events,payment_orders,approval_sessions,webauthn_challenges,intent_locks,merchant_payment_configurations,product_revisions,products,merchant_api_keys,merchant_invitations,merchant_memberships,passkey_credentials,browser_sessions,merchants,users CASCADE`);
+  await pool.query(`TRUNCATE TABLE merchant_ai_commerce_events,rate_limits,oauth_tokens,oauth_authorization_codes,audit_events,audit_chain_heads,webhook_events,payment_orders,approval_sessions,webauthn_challenges,intent_locks,merchant_payment_configurations,product_revisions,products,merchant_api_keys,merchant_invitations,merchant_memberships,passkey_credentials,browser_sessions,merchants,users CASCADE`);
 });
 afterAll(async () => { await pool?.end(); });
 afterEach(() => vi.unstubAllGlobals());
@@ -130,6 +130,45 @@ describe("PostgreSQL tenant and payment invariants", () => {
     const order = await store.getOrderByIntent(setup.intent.id); expect(order).not.toBeNull(); await service.completeMockPayment(order!.id);
     const events = await store.auditTrail("intent", setup.intent.id); const paymentEvents = events.filter((event) => event.eventType === "PAYMENT_ORDER_CREATED" || event.eventType === "PAYMENT_VERIFIED");
     expect(paymentEvents).toHaveLength(2); expect(paymentEvents.every((event) => event.actor === "mock_adapter")).toBe(true);
+  });
+
+  it("promotes a Shopify and Razorpay merchant through clear AI-sales readiness states", async () => {
+    const owner = await user("readiness-owner"); const merchant = await store.createMerchant(owner.id, { slug: "readiness-shop", displayName: "Readiness Shop" });
+    expect((await store.merchantReadiness(merchant.id)).status).toBe("not_ready");
+    const connection = await store.saveShopifyConnection({ merchantId: merchant.id, provider: "shopify", shopDomain: "readiness-shop.myshopify.com", accessTokenCiphertext: "encrypted-token", encryptionKeyVersion: 1, shopName: "Readiness Shop", currency: "INR", defaultRefundable: false, defaultRefundWindowDays: 0 });
+    await store.syncShopifyProducts(owner.id, connection, [{ externalId: "gid://shopify/ProductVariant/ready", sku: "READY-1", name: "AI-ready product", description: "Authoritative Shopify product", pricePaise: 2_000, active: true, externalUpdatedAt: new Date().toISOString() }]);
+    expect((await store.merchantReadiness(merchant.id)).status).toBe("catalog_ready");
+    await store.savePaymentConfig(merchant.id, { adapter: "razorpay", keyId: "rzp_test_readiness", keySecretCiphertext: service.vault.encrypt("test-secret"), webhookSecretCiphertext: service.vault.encrypt("test-webhook"), encryptionKeyVersion: service.vault.version });
+    expect(await store.merchantReadiness(merchant.id)).toMatchObject({ status: "ai_transactable", shopifyConnected: true, razorpayTestModeConnected: true, productsAvailable: 1, webhookStatus: "configured_unverified" });
+    await store.recordWebhook(merchant.id, "event-ready", "payment.captured");
+    expect((await store.merchantReadiness(merchant.id)).webhookStatus).toBe("verified");
+  });
+
+  it("returns an active agent-readable storefront and deduplicates repeated discovery reads", async () => {
+    const owner = await user("storefront-owner"); const buyer = await user("storefront-buyer"); const merchant = await store.createMerchant(owner.id, { slug: "agent-storefront", displayName: "Agent Storefront" });
+    const active = await store.createProduct(owner.id, merchant.id, { sku: "ACTIVE-1", name: "Active product", description: "Shown to AI buyers", pricePaise: 4_900, refundable: true, refundWindowDays: 7 });
+    const archived = await store.createProduct(owner.id, merchant.id, { sku: "OLD-1", name: "Archived product", description: "Must stay hidden", pricePaise: 3_900, refundable: false, refundWindowDays: 0 });
+    await store.updateProduct(owner.id, merchant.id, archived.id, archived.version, { active: false });
+    const first = await store.merchantStorefront(merchant.slug, buyer.id); const second = await store.merchantStorefront(merchant.slug, buyer.id);
+    expect(first?.products.map((product) => product.id)).toEqual([active.id]); expect(second?.products).toHaveLength(1); expect(first?.checkout).toMatchObject({ buyerPasskeyRequired: true, livePaymentMode: "test", razorpayTestModeAvailable: false });
+    const summary = await store.merchantAiSalesSummary(merchant.id); expect(summary).toMatchObject({ catalogDiscoveries: 1, productsShown: 1 });
+  });
+
+  it("counts only verified AI-attributed Razorpay Test payments as Test Mode GMV", async () => {
+    const setup = await approvedIntent("analytics-buyer-mock"); const mockCheckout = await service.prepareCheckout(setup.buyer.id, setup.intent.id); expect(mockCheckout.checkoutUrl).toBeTruthy(); const mockOrder = await store.getOrderByIntent(setup.intent.id); await service.completeMockPayment(mockOrder!.id);
+    const razorpayConfig = await store.savePaymentConfig(setup.merchant.id, { adapter: "razorpay", keyId: "rzp_test_analytics", keySecretCiphertext: service.vault.encrypt("test-secret"), webhookSecretCiphertext: service.vault.encrypt("test-webhook"), encryptionKeyVersion: service.vault.version });
+    const buyer = await user("analytics-buyer-razorpay"); const created = await service.createIntent(buyer.id, { merchantId: setup.merchant.id, productId: setup.product.id, maxTotalPaise: setup.product.pricePaise, priceChangePolicy: "none", requireRefundable: false, minimumRefundWindowDays: null, expiresInMinutes: 10 });
+    const token = new URL(created.approvalUrl).searchParams.get("token")!; const approval = await store.exchangeApprovalToken(created.intent.id, buyer.id, token); await store.completeApproval({ purchasePermitId: created.intent.id, buyerId: buyer.id, sessionToken: approval!.token, credentialId: "cred_analytics-buyer-razorpay", counter: 1, deviceType: "singleDevice", backedUp: false });
+    const claim = await store.prepareOrderClaim(created.intent.id, buyer.id, evaluatePurchasePermit, razorpayConfig.version); expect(claim.kind).toBe("claimed"); if (claim.kind !== "claimed") throw new Error("Expected claimed Razorpay Test order");
+    const order = await store.completeOrder(claim.order.id, "order_test_analytics", "razorpay"); await store.markPaid(order.id, "pay_test_analytics", "razorpay");
+    const summary = await store.merchantAiSalesSummary(setup.merchant.id); expect(summary).toMatchObject({ purchasePermitsCreated: 1, passkeyApprovals: 1, razorpayTestOrdersCreated: 1, razorpayTestPaymentsVerified: 1, testGmvPaise: setup.product.pricePaise }); expect(summary.topProducts[0]).toMatchObject({ productId: setup.product.id, selections: 1 });
+  });
+
+  it("keeps merchant AI-sales analytics tenant isolated", async () => {
+    const first = await merchantProduct("analytics-tenant-one"); const second = await merchantProduct("analytics-tenant-two");
+    await store.recordAiCommerceEvent({ merchantId: first.merchant.id, productId: first.product.id, eventType: "CATALOG_DISCOVERED", source: "chatgpt_mcp", deduplicationKey: "first-only" });
+    expect((await store.merchantAiSalesSummary(first.merchant.id)).catalogDiscoveries).toBe(1); expect((await store.merchantAiSalesSummary(second.merchant.id)).catalogDiscoveries).toBe(0);
+    expect(await store.requireMembership(first.owner.id, second.merchant.id, ["owner", "admin", "catalog_manager", "auditor"])).toBeNull();
   });
 
   it("prepares one browser purchase, blocks replay, and verifies its task chain", async () => {

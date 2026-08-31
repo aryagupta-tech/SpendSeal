@@ -22,7 +22,7 @@ export class SpendSealService {
       requireRefundable: input.requireRefundable,
       minimumRefundWindowDays: input.minimumRefundWindowDays,
       expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString(),
-    });
+    }, actor === "buyer" ? "buyer_web" : "chatgpt_mcp");
     if (actor === "buyer") await this.store.appendAudit({ scopeType: "intent", scopeId: created.intent.id, merchantId: created.intent.merchantId, purchasePermitId: created.intent.id, eventType: "STANDALONE_INTENT_SUBMITTED", actor: "buyer", reasonCode: null, payload: { source: "structured_form", buyerId } });
     return { intent: created.intent, product, approvalUrl: `${this.config.publicBaseUrl}/approve/${created.intent.id}?token=${encodeURIComponent(created.approvalToken)}` };
   }
@@ -44,6 +44,7 @@ export class SpendSealService {
         const product = await this.store.getProduct(initial.merchantId, initial.productId);
         const decision: PolicyDecision = { allowed: false, reasons: ["CATALOG_REFRESH_FAILED"], message: "Checkout paused because SpendSeal could not re-check the authoritative Shopify product. No payment order was created.", evaluatedAt: now, observedAt: now, observedPricePaise: product?.pricePaise ?? 0, observedProductVersion: product?.version ?? null, observedProductRevisionId: product?.revisionId ?? null, observedProductSnapshotHash: product?.snapshotHash ?? null, catalogAuthority: product?.catalogAuthority ?? null };
         await this.store.appendAudit({ scopeType: "intent", scopeId: initial.id, merchantId: initial.merchantId, purchasePermitId: initial.id, eventType: "AUTHORITATIVE_PRODUCT_REFRESH_FAILED", actor: "policy_engine", reasonCode: "CATALOG_REFRESH_FAILED", payload: { source: "shopify_admin_graphql", errorCode: error instanceof ShopifyError ? error.code : "SHOPIFY_REQUEST_FAILED", decision } });
+        await this.store.recordAiCommerceEvent({ merchantId: initial.merchantId, productId: initial.productId, purchasePermitId: initial.id, eventType: "POLICY_DENIED", source: "policy_engine", deduplicationKey: `policy:catalog-refresh-failed:${initial.id}` });
         return { intent: initial, decision };
       }
     }
@@ -52,6 +53,7 @@ export class SpendSealService {
       const now = new Date().toISOString();
       const decision: PolicyDecision = { allowed: false, reasons: ["PAYMENT_CONFIG_MISSING"], message: "Checkout blocked: this merchant has not connected a Test Mode payment adapter.", evaluatedAt: now, observedAt: now, observedPricePaise: 0, observedProductVersion: null, observedProductRevisionId: null, observedProductSnapshotHash: null, catalogAuthority: null };
       await this.store.appendAudit({ scopeType: "intent", scopeId: initial.id, merchantId: initial.merchantId, purchasePermitId: initial.id, eventType: "POLICY_DENIED", actor: "policy_engine", reasonCode: "PAYMENT_CONFIG_MISSING", payload: { decision } });
+      await this.store.recordAiCommerceEvent({ merchantId: initial.merchantId, productId: initial.productId, purchasePermitId: initial.id, eventType: "POLICY_DENIED", source: "policy_engine", deduplicationKey: `policy:payment-config-missing:${initial.id}` });
       return { intent: initial, decision };
     }
     let preparation;
@@ -63,6 +65,7 @@ export class SpendSealService {
       const now = new Date().toISOString();
       const decision: PolicyDecision = { allowed: false, reasons: ["REPLAY_DETECTED"], message: preparation.order.status === "ready" ? "The existing checkout is returned; no duplicate order was created." : "PurchasePermit already consumed. No duplicate order was created.", evaluatedAt: now, observedAt: preparation.order.observedAt, observedPricePaise: preparation.order.amountPaise, observedProductVersion: preparation.order.observedProductVersion, observedProductRevisionId: preparation.order.observedProductRevisionId, observedProductSnapshotHash: preparation.order.observedProductSnapshotHash, catalogAuthority: preparation.order.catalogAuthority };
       await this.store.appendAudit({ scopeType: "intent", scopeId: preparation.intent.id, merchantId: preparation.intent.merchantId, purchasePermitId: preparation.intent.id, eventType: "REPLAY_BLOCKED", actor: "policy_engine", reasonCode: "REPLAY_DETECTED", payload: { orderId: preparation.order.id, orderStatus: preparation.order.status } });
+      await this.store.recordAiCommerceEvent({ merchantId: preparation.intent.merchantId, productId: preparation.intent.productId, purchasePermitId: preparation.intent.id, paymentOrderId: preparation.order.id, eventType: "REPLAY_BLOCKED", source: "policy_engine", deduplicationKey: `replay:${preparation.intent.id}` });
       return { intent: preparation.intent, decision, ...(preparation.order.status === "ready" ? { checkoutUrl: `${this.config.publicBaseUrl}/checkout/${preparation.order.checkoutToken}`, orderStatus: preparation.order.status } : {}) };
     }
 

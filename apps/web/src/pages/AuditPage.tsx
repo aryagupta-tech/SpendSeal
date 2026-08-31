@@ -61,7 +61,7 @@ export function AuditPage() {
       </section>
     </Reveal>
 
-    <Link to="/" className="mt-7 inline-block text-sm text-white/40 transition hover:text-white">← Return to merchant console</Link>
+    <Link to="/" className="mt-7 inline-block text-sm text-white/40 transition hover:text-white">← Return to AI Sales Channel</Link>
   </div>;
 }
 
